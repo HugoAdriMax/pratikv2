@@ -96,7 +96,7 @@ CREATE POLICY "Users can see job participant locations"
 
 -- On accorde les permissions nécessaires
 GRANT ALL ON public.user_locations TO authenticated;
-GRANT USAGE, SELECT ON SEQUENCE public.user_locations_id_seq TO authenticated;
+-- Pas besoin d'accorder les permissions sur la séquence car on utilise des UUID générés par uuid_generate_v4()
 
 -- Fonction pour obtenir la localisation d'un prestataire pour un job spécifique
 CREATE OR REPLACE FUNCTION get_prestataire_location(job_id UUID)
