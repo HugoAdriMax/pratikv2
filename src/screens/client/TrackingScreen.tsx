@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   TouchableOpacity, 
@@ -18,29 +18,24 @@ import { Job, TrackingStatus } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { Text, Card, Button, Badge, Avatar } from '../../components/ui';
 import supabase from '../../config/supabase';
+import MapView, { Marker, Polyline } from 'react-native-maps';
+import { 
+  calculateDistance as calcDistance, 
+  updateUserLocation,
+  subscribeToUserLocation,
+  calculateETA,
+  getUserLocation,
+  UserLocation
+} from '../../services/location';
 
 const { width } = Dimensions.get('window');
 
-// Fonction pour calculer la distance entre deux points GPS (formule de Haversine)
+// Fonction pour calculer la distance entre deux points GPS 
 const calculateDistance = (
   point1: { latitude: number; longitude: number }, 
   point2: { latitude: number; longitude: number }
-) => {
-  const toRad = (value: number) => (value * Math.PI) / 180;
-  const R = 6371; // Rayon de la Terre en km
-  
-  const dLat = toRad(point2.latitude - point1.latitude);
-  const dLon = toRad(point2.longitude - point1.longitude);
-  
-  const a = 
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(point1.latitude)) * Math.cos(toRad(point2.latitude)) * 
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const distance = R * c; // Distance en km
-  
-  return distance.toFixed(1);
+): string => {
+  return calcDistance(point1, point2).toFixed(1);
 };
 
 // Composant pour afficher le statut
@@ -69,6 +64,9 @@ const TrackingScreen = ({ route, navigation }: any) => {
   const { offerId } = route.params;
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
+  
+  // Référence à la carte pour la suivre avec une animation
+  const mapRef = useRef<MapView | null>(null);
   
   const [job, setJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
@@ -285,7 +283,7 @@ const TrackingScreen = ({ route, navigation }: any) => {
       return;
     }
     
-    // 2. Obtenir la position actuelle
+    // 2. Obtenir la position actuelle du client 
     try {
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High
@@ -296,18 +294,45 @@ const TrackingScreen = ({ route, navigation }: any) => {
         longitude: location.coords.longitude
       };
       
+      // Obtenir l'adresse pour l'affichage
+      try {
+        const addressResponse = await Location.reverseGeocodeAsync({
+          latitude: currentLocation.latitude,
+          longitude: currentLocation.longitude
+        });
+        
+        if (addressResponse && addressResponse.length > 0) {
+          const addressObj = addressResponse[0];
+          const addressStr = [
+            addressObj.name,
+            addressObj.street,
+            addressObj.postalCode,
+            addressObj.city
+          ].filter(Boolean).join(', ');
+          
+          currentLocation.address = addressStr;
+        }
+      } catch (addressError) {
+        console.error('Error getting address:', addressError);
+      }
+      
+      // Mettre à jour l'état local
       setUserLocation(currentLocation);
       
-      // Simuler l'envoi des données de position (broadcast)
-      if (job && prestataire) {
-        console.log('Position client mise à jour:', currentLocation);
+      // Mise à jour de la localisation du client en base de données avec le nouveau service
+      try {
+        await updateUserLocation(user.id, currentLocation);
+        console.log('Position client mise à jour en base de données');
+      } catch (error) {
+        console.error('Error updating client location in database:', error);
       }
+      
     } catch (error) {
       console.error('Error getting current position:', error);
       Alert.alert('Erreur', 'Impossible d\'obtenir votre position actuelle');
     }
     
-    // 3. Configurer le suivi périodique via watchPositionAsync (plus simple)
+    // 3. Configurer le suivi périodique via watchPositionAsync
     try {
       const watchPosition = await Location.watchPositionAsync(
         {
@@ -315,7 +340,7 @@ const TrackingScreen = ({ route, navigation }: any) => {
           timeInterval: 5000, // 5 secondes
           distanceInterval: 10 // 10 mètres
         },
-        (newLocation) => {
+        async (newLocation) => {
           const position = {
             latitude: newLocation.coords.latitude,
             longitude: newLocation.coords.longitude
@@ -324,8 +349,13 @@ const TrackingScreen = ({ route, navigation }: any) => {
           // Mettre à jour l'état local
           setUserLocation(position);
           
-          // Simuler l'envoi des données (log uniquement)
-          console.log('Nouvelle position client:', position);
+          // Mise à jour de la localisation du client en base de données avec le nouveau service
+          try {
+            await updateUserLocation(user.id, position);
+            console.log('Position client mise à jour en base de données (watchPosition)');
+          } catch (error) {
+            console.error('Error updating client location in database:', error);
+          }
         }
       );
       
@@ -335,39 +365,113 @@ const TrackingScreen = ({ route, navigation }: any) => {
       console.error('Error setting up position watching:', error);
     }
     
-    // Simuler des mises à jour de position du prestataire
-    if (job && prestataire) {
-      // Au lieu d'essayer d'utiliser une table inexistante, on simule les données
-      console.log('Simulation de position du prestataire...');
+    // 4. S'abonner aux mises à jour de position du prestataire en temps réel 
+    if (job && job.prestataire_id) {
+      console.log(`Configuration du suivi en temps réel pour le prestataire ${job.prestataire_id}`);
       
-      // Générer une position légèrement différente pour le prestataire toutes les 10 secondes
-      const prestataireUpdateInterval = setInterval(() => {
-        // On génère une petite variation aléatoire de la position
-        const randomLat = (Math.random() - 0.5) * 0.01; // variation de ±0.005 degrés
-        const randomLng = (Math.random() - 0.5) * 0.01;
+      // Configuration initiale avec une position par défaut
+      let initialPrestataireLocation = {
+        latitude: 48.8566, // Paris
+        longitude: 2.3522
+      };
+      
+      // Récupérer la position actuelle du prestataire depuis la base de données
+      try {
+        const prestataireLocation = await getUserLocation(job.prestataire_id);
         
-        if (prestataire && prestataire.location) {
-          const newLocation = {
-            latitude: prestataire.location.latitude + randomLat,
-            longitude: prestataire.location.longitude + randomLng
+        if (prestataireLocation) {
+          console.log('Position initiale du prestataire récupérée:', prestataireLocation);
+          initialPrestataireLocation = {
+            latitude: prestataireLocation.latitude,
+            longitude: prestataireLocation.longitude
           };
           
+          // Mettre à jour l'état avec la position initiale du prestataire
           setPrestataire(prev => ({
             ...prev!,
-            location: newLocation
+            location: initialPrestataireLocation
           }));
           
-          console.log('Nouvelle position du prestataire (simulée):', newLocation);
-        }
-      }, 10000); // Toutes les 10 secondes
-      
-      // Stocker l'intervalle pour le nettoyage
-      return () => {
-        clearInterval(prestataireUpdateInterval);
-        if (watchId) {
-          if (typeof watchId === 'object' && 'remove' in watchId) {
-            watchId.remove();
+          // Calculer l'ETA initial
+          if (userLocation) {
+            const distanceValue = calcDistance(userLocation, initialPrestataireLocation);
+            const etaMinutes = calculateETA(distanceValue);
+            
+            // Formater l'affichage de l'ETA
+            if (etaMinutes <= 1) {
+              setEta('Moins d\'1 min');
+            } else if (etaMinutes < 60) {
+              setEta(`${etaMinutes} min`);
+            } else {
+              const hours = Math.floor(etaMinutes / 60);
+              const mins = etaMinutes % 60;
+              setEta(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+            }
           }
+        } else {
+          console.log('Aucune position du prestataire trouvée, utilisation de la position par défaut');
+          
+          // Mettre à jour l'état avec la position par défaut
+          setPrestataire(prev => ({
+            ...prev!,
+            location: initialPrestataireLocation
+          }));
+        }
+      } catch (error) {
+        console.error('Error fetching prestataire location:', error);
+        
+        // Mettre à jour l'état avec la position par défaut en cas d'erreur
+        setPrestataire(prev => ({
+          ...prev!,
+          location: initialPrestataireLocation
+        }));
+      }
+      
+      // S'abonner aux mises à jour de position du prestataire
+      const unsubscribe = subscribeToUserLocation(job.prestataire_id, (updatedLocation: UserLocation) => {
+        console.log('Mise à jour de position du prestataire reçue:', updatedLocation);
+        
+        // Mettre à jour l'état avec la nouvelle position
+        const newLocation = {
+          latitude: updatedLocation.latitude,
+          longitude: updatedLocation.longitude
+        };
+        
+        setPrestataire(prev => ({
+          ...prev!,
+          location: newLocation
+        }));
+        
+        // Mettre à jour le temps d'arrivée estimé
+        if (userLocation) {
+          const distanceValue = calcDistance(userLocation, newLocation);
+          const etaMinutes = calculateETA(distanceValue);
+          
+          // Formater l'affichage de l'ETA
+          if (etaMinutes <= 1) {
+            setEta('Moins d\'1 min');
+          } else if (etaMinutes < 60) {
+            setEta(`${etaMinutes} min`);
+          } else {
+            const hours = Math.floor(etaMinutes / 60);
+            const mins = etaMinutes % 60;
+            setEta(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+          }
+        }
+      });
+      
+      // Retourner une fonction de nettoyage
+      return () => {
+        console.log('Nettoyage des abonnements de localisation');
+        
+        // Se désabonner des mises à jour Realtime
+        if (unsubscribe) {
+          unsubscribe();
+        }
+        
+        // Nettoyer la surveillance de position
+        if (watchId && typeof watchId === 'object' && 'remove' in watchId) {
+          watchId.remove();
         }
       };
     }
@@ -450,13 +554,23 @@ const TrackingScreen = ({ route, navigation }: any) => {
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
       <ScrollView showsVerticalScrollIndicator={false}>
-        {/* En-tête avec statut */}
+        {/* En-tête avec statut - commenté pour éviter la duplication */}
+        {/*
         <View style={styles.header}>
           <View style={styles.headerTitleRow}>
             <Text variant="h4" weight="semibold">Suivi en temps réel</Text>
             <StatusBadge status={job.tracking_status} />
           </View>
           <Text variant="body2" color="text-secondary">
+            Mission #{job.id.substring(0, 8)}
+          </Text>
+        </View>
+        */}
+        
+        {/* Affichage du statut sous forme de badge en haut de l'écran */}
+        <View style={styles.statusContainer}>
+          <StatusBadge status={job.tracking_status} />
+          <Text variant="body2" color="text-secondary" style={styles.marginLeft}>
             Mission #{job.id.substring(0, 8)}
           </Text>
         </View>
@@ -480,7 +594,7 @@ const TrackingScreen = ({ route, navigation }: any) => {
               </View>
               <TouchableOpacity 
                 style={styles.iconButton} 
-                onPress={() => Alert.alert('Contact', 'Fonctionnalité de chat disponible prochainement')}
+                onPress={() => navigation.navigate('Chat', { jobId: job.id })}
               >
                 <Ionicons name="chatbubble-outline" size={22} color={COLORS.primary} />
               </TouchableOpacity>
@@ -518,7 +632,7 @@ const TrackingScreen = ({ route, navigation }: any) => {
           </View>
         </Card>
         
-        {/* Carte de localisation (version texte) */}
+        {/* Carte de localisation avec MapView */}
         <Card style={styles.card} elevation="sm">
           <View style={styles.sectionHeader}>
             <Text variant="h5" weight="semibold" style={styles.smallMarginBottom}>
@@ -527,14 +641,75 @@ const TrackingScreen = ({ route, navigation }: any) => {
           </View>
           
           {userLocation && prestataire?.location ? (
-            <View style={styles.locationContent}>
-              <View style={styles.marginBottom}>
-                <Text variant="body2" weight="medium" color="text-secondary" style={styles.smallMarginBottom}>Votre position</Text>
-                <View style={styles.coordinatesContainer}>
-                  <Text>
-                    {userLocation.latitude.toFixed(5)}, {userLocation.longitude.toFixed(5)}
+            <View>
+              {/* Carte interactive */}
+              <View style={styles.mapContainer}>
+                <MapView
+                  ref={mapRef}
+                  style={styles.map}
+                  initialRegion={{
+                    latitude: prestataire.location.latitude,
+                    longitude: prestataire.location.longitude,
+                    latitudeDelta: 0.02,
+                    longitudeDelta: 0.02,
+                  }}
+                >
+                  {/* Marqueur pour le client */}
+                  <Marker
+                    coordinate={{
+                      latitude: userLocation.latitude,
+                      longitude: userLocation.longitude
+                    }}
+                    title="Votre position"
+                    pinColor={COLORS.primary}
+                  />
+
+                  {/* Marqueur pour le prestataire */}
+                  <Marker
+                    coordinate={{
+                      latitude: prestataire.location.latitude,
+                      longitude: prestataire.location.longitude
+                    }}
+                    title="Prestataire"
+                    pinColor="red"
+                  />
+                  
+                  {/* Ligne qui relie les deux points */}
+                  <Polyline
+                    coordinates={[
+                      { latitude: userLocation.latitude, longitude: userLocation.longitude },
+                      { latitude: prestataire.location.latitude, longitude: prestataire.location.longitude }
+                    ]}
+                    strokeColor="#007AFF"
+                    strokeWidth={3}
+                  />
+                </MapView>
+              </View>
+
+              <View style={styles.mapActions}>
+                {/* Bouton pour localiser le prestataire */}
+                <TouchableOpacity 
+                  style={styles.mapButton}
+                  onPress={() => {
+                    if (prestataire?.location && mapRef.current) {
+                      try {
+                        mapRef.current.animateToRegion({
+                          latitude: prestataire.location.latitude,
+                          longitude: prestataire.location.longitude,
+                          latitudeDelta: 0.02,
+                          longitudeDelta: 0.02,
+                        }, 1000);
+                      } catch (e) {
+                        console.log('Erreur d\'animation:', e);
+                      }
+                    }
+                  }}
+                >
+                  <Ionicons name="locate" size={18} color={COLORS.primary} />
+                  <Text variant="caption" color="primary" style={styles.smallMarginLeft}>
+                    Suivre le prestataire
                   </Text>
-                </View>
+                </TouchableOpacity>
               </View>
               
               <View style={styles.distanceContainer}>
@@ -544,25 +719,26 @@ const TrackingScreen = ({ route, navigation }: any) => {
                 </Text>
               </View>
               
-              <View>
-                <Text variant="body2" weight="medium" color="text-secondary" style={styles.smallMarginBottom}>Position du prestataire</Text>
-                <View style={styles.coordinatesContainer}>
-                  <Text>
-                    {prestataire.location.latitude.toFixed(5)}, {prestataire.location.longitude.toFixed(5)}
-                  </Text>
-                </View>
-              </View>
-              
               <View style={styles.legendContainer}>
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: COLORS.primary }]} />
                   <Text variant="body2">Vous</Text>
                 </View>
                 <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.danger }]} />
+                  <View style={[styles.legendDot, { backgroundColor: "red" }]} />
                   <Text variant="body2">Prestataire</Text>
                 </View>
               </View>
+              
+              {/* Information d'estimation d'arrivée au lieu des coordonnées */}
+              {job.tracking_status === TrackingStatus.EN_ROUTE && (
+                <View style={styles.etaContainer}>
+                  <Ionicons name="time-outline" size={20} color={COLORS.info} style={styles.marginRight} />
+                  <Text variant="body1" weight="medium">
+                    Temps d'arrivée estimé: <Text color="primary">{eta || '15-20 min'}</Text>
+                  </Text>
+                </View>
+              )}
             </View>
           ) : (
             <View style={styles.emptyStateContainer}>
@@ -631,6 +807,38 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    backgroundColor: COLORS.white,
+  },
+  mapActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    paddingHorizontal: SPACING.sm,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
+  mapButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${COLORS.primary}15`,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 6,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  etaContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: `${COLORS.info}15`,
+    paddingVertical: SPACING.md,
+    marginTop: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
   },
   loadingContainer: {
     flex: 1,
@@ -711,6 +919,38 @@ const styles = StyleSheet.create({
     padding: SPACING.md,
     borderRadius: BORDER_RADIUS.md
   },
+  // Nouveaux styles pour la carte
+  mapContainer: {
+    height: 250,
+    marginVertical: SPACING.md,
+    borderRadius: BORDER_RADIUS.md,
+    overflow: 'hidden'
+  },
+  map: {
+    width: '100%',
+    height: '100%'
+  },
+  markerContainer: {
+    alignItems: 'center'
+  },
+  marker: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 5
+  },
+  coordinatesInfo: {
+    padding: SPACING.sm,
+    marginTop: SPACING.sm,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: BORDER_RADIUS.md
+  },
   distanceContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -723,10 +963,11 @@ const styles = StyleSheet.create({
   legendContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: SPACING.lg,
-    paddingTop: SPACING.md,
+    marginVertical: SPACING.sm,
+    paddingVertical: SPACING.sm,
     borderTopWidth: 1,
-    borderTopColor: COLORS.border
+    borderBottomWidth: 1,
+    borderColor: COLORS.border
   },
   legendItem: {
     flexDirection: 'row',
@@ -779,6 +1020,9 @@ const styles = StyleSheet.create({
   },
   marginRight: {
     marginRight: SPACING.sm
+  },
+  smallMarginRight: {
+    marginRight: 4
   }
 });
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   TouchableOpacity, 
@@ -12,36 +12,24 @@ import {
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { getJobByOfferId, updateJobTrackingStatus, completeJob } from '../../services/api';
+import { getJobByOfferId, updateJobTrackingStatus, completeJob, getServiceById, getUserById } from '../../services/api';
 import { Job, TrackingStatus } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { Text, Card, Button, Badge, Avatar } from '../../components/ui';
 import { COLORS, SHADOWS, SPACING, BORDER_RADIUS } from '../../utils/theme';
-import { getServiceById, getClientById, getRequestById, getOfferById, enrichJobWithMockData } from '../../utils/mockData';
+import supabase from '../../config/supabase';
+import { 
+  calculateDistance, 
+  updateUserLocation, 
+  subscribeToUserLocation, 
+  calculateETA, 
+  getUserLocation,
+  UserLocation,
+  getCurrentPositionWithAddress
+} from '../../services/location';
+import MapView, { Marker, Polyline } from 'react-native-maps';
 
 const { width } = Dimensions.get('window');
-
-// Fonction pour calculer la distance entre deux points GPS (formule de Haversine)
-const calculateDistance = (
-  point1: { latitude: number; longitude: number }, 
-  point2: { latitude: number; longitude: number }
-) => {
-  const toRad = (value: number) => (value * Math.PI) / 180;
-  const R = 6371; // Rayon de la Terre en km
-  
-  const dLat = toRad(point2.latitude - point1.latitude);
-  const dLon = toRad(point2.longitude - point1.longitude);
-  
-  const a = 
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(point1.latitude)) * Math.cos(toRad(point2.latitude)) * 
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const distance = R * c; // Distance en km
-  
-  return distance.toFixed(1);
-};
 
 // Composant pour afficher le statut
 const StatusBadge = ({ status }: { status: TrackingStatus }) => {
@@ -70,7 +58,11 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   
+  // Référence à la carte pour les animations
+  const mapRef = useRef<MapView | null>(null);
+  
   const [job, setJob] = useState<Job | null>(null);
+  const [service, setService] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [location, setLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [client, setClient] = useState<{
@@ -110,67 +102,136 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
       
       // Si pas de job, essayons de récupérer directement l'offre et la demande associée
       if (!jobData) {
-        console.log('Aucun job trouvé pour l\'offre:', jobId);
+        console.log('Aucun job trouvé pour l\'identifiant:', jobId);
         
-        // Récupérer les informations de l'offre
+        // Variable pour stocker les données d'offre, quelle que soit la façon dont on les trouve
+        let offerDataFound = null;
+        
+        // Récupérer les informations de l'offre, en supposant que jobId est un ID d'offre
+        // Utiliser maybeSingle pour éviter les erreurs si aucune offre n'est trouvée
         const { data: offerData, error: offerError } = await supabase
           .from('offers')
           .select(`
             *,
-            requests:request_id(*)
+            requests:request_id(*),
+            prestataires:prestataire_id(*)
           `)
           .eq('id', jobId)
           .maybeSingle();
         
         if (offerError) {
           console.error('Erreur lors de la récupération de l\'offre:', offerError);
-          throw offerError;
+          // Ne pas propager l'erreur, mais continuer le flux
+          console.warn('Tentative de récupération de l\'offre échouée, mais on continue');
+        } else if (offerData) {
+          // Offre trouvée directement
+          offerDataFound = offerData;
         }
         
-        if (!offerData) {
-          console.log('Aucune offre trouvée non plus');
-          throw new Error('Aucune offre ni job trouvé avec cet identifiant');
+        // Si aucune offre n'est trouvée avec cet ID, essayons de vérifier si c'est un ID de demande
+        if (!offerDataFound) {
+          console.log('Aucune offre trouvée avec cet ID. Tentative de recherche en tant que demande...');
+          
+          const { data: requestData, error: requestError } = await supabase
+            .from('requests')
+            .select('*, offers:id(*)')
+            .eq('id', jobId)
+            .maybeSingle();
+            
+          if (requestError || !requestData) {
+            console.log('Aucune demande trouvée non plus avec cet ID');
+            // Ne pas lever d'exception, laisser le flux continuer et afficher un message d'erreur propre
+            setLoading(false);
+            return;
+          }
+          
+          // Si nous avons trouvé une demande, chercher ses offres associées
+          const { data: requestOffers, error: requestOffersError } = await supabase
+            .from('offers')
+            .select('*')
+            .eq('request_id', requestData.id)
+            .maybeSingle();
+            
+          if (requestOffersError || !requestOffers) {
+            console.log('Aucune offre associée à la demande trouvée');
+            setLoading(false);
+            return;
+          }
+          
+          // Utiliser l'offre associée à la demande
+          console.log('Offre trouvée via la demande:', requestOffers);
+          offerDataFound = requestOffers;
+          // Ajouter les données de requête à l'offre trouvée
+          offerDataFound.requests = requestData;
         }
         
-        console.log('Offre trouvée:', offerData);
+        // Si nous n'avons pas trouvé d'offre par aucun moyen, arrêter ici
+        if (!offerDataFound) {
+          console.log('Impossible de trouver une offre ou une demande correspondante');
+          setLoading(false);
+          return;
+        }
+        
+        console.log('Offre trouvée:', offerDataFound);
         
         // Créer un job avec les données de l'offre
         const baseJob = {
           id: `job-for-${jobId}`,
-          offer_id: jobId,
-          client_id: offerData.requests?.client_id || 'unknown-client',
-          prestataire_id: user?.id || offerData.prestataire_id,
+          offer_id: offerDataFound.id,
+          client_id: offerDataFound.requests?.client_id || 'unknown-client',
+          prestataire_id: user?.id || offerDataFound.prestataire_id,
           tracking_status: 'not_started',
           is_completed: false,
           created_at: new Date().toISOString(),
           // Ajouter directement les données de l'offre et de la requête
-          offers: offerData,
-          requests: offerData.requests
+          offers: offerDataFound,
+          requests: offerDataFound.requests
         };
         
         // Définir le job
         setJob(baseJob as Job);
         
+        // Récupérer les informations du service
+        if (offerDataFound.requests?.service_id) {
+          try {
+            const serviceData = await getServiceById(offerDataFound.requests.service_id);
+            setService(serviceData);
+          } catch (serviceError) {
+            console.error('Error fetching service details:', serviceError);
+          }
+        }
+        
         // Récupérer les informations du client
-        if (offerData.requests && offerData.requests.client_id) {
-          const { data: clientData } = await supabase
-            .from('users')
-            .select(`id, email`)
-            .eq('id', offerData.requests.client_id)
-            .maybeSingle();
-          
-          // Adresse depuis la requête
-          const clientLocation = offerData.requests.location || {
-            latitude: 48.8566,
-            longitude: 2.3522,
-            address: "123 Avenue des Champs-Élysées, Paris"
-          };
-          
-          setClient({
-            id: offerData.requests.client_id,
-            name: clientData?.email?.split('@')[0] || 'Client',
-            location: clientLocation
-          });
+        if (offerDataFound.requests && offerDataFound.requests.client_id) {
+          try {
+            const clientData = await getUserById(offerDataFound.requests.client_id);
+            
+            // Adresse depuis la requête
+            const clientLocation = offerDataFound.requests.location || {
+              latitude: 48.8566,
+              longitude: 2.3522,
+              address: "123 Avenue des Champs-Élysées, Paris"
+            };
+            
+            setClient({
+              id: offerDataFound.requests.client_id,
+              name: clientData?.email?.split('@')[0] || 'Client',
+              location: clientLocation
+            });
+          } catch (clientError) {
+            console.error('Error fetching client details:', clientError);
+            
+            // Client par défaut si non trouvé
+            setClient({
+              id: offerDataFound.requests.client_id,
+              name: 'Client',
+              location: offerDataFound.requests.location || {
+                latitude: 48.8566,
+                longitude: 2.3522,
+                address: "Adresse du client"
+              }
+            });
+          }
         } else {
           // Client par défaut si non trouvé
           setClient({
@@ -192,42 +253,71 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
         // Utiliser les données réelles
         setJob(jobData);
         
+        // Récupérer les informations du service
+        if (jobData.offers?.request_id) {
+          try {
+            const { data: requestData } = await supabase
+              .from('requests')
+              .select('service_id')
+              .eq('id', jobData.offers.request_id)
+              .single();
+              
+            if (requestData?.service_id) {
+              const serviceData = await getServiceById(requestData.service_id);
+              setService(serviceData);
+            }
+          } catch (serviceError) {
+            console.error('Error fetching service details:', serviceError);
+          }
+        }
+        
         // Récupérer les données du client à partir de jobData.client_id
         if (jobData.client_id) {
-          const { data: clientData } = await supabase
-            .from('users')
-            .select(`id, email`)
-            .eq('id', jobData.client_id)
-            .maybeSingle();
-            
-          // Tenter de récupérer l'adresse depuis la requête
-          let clientLocation = {
-            latitude: 48.8566,
-            longitude: 2.3522,
-            address: "Adresse du client"
-          };
-          
-          // Tenter de récupérer la requête via l'offre
-          if (jobData.offer_id) {
-            const { data: offerWithRequest } = await supabase
-              .from('offers')
-              .select(`
-                request_id,
-                requests:request_id(location)
-              `)
-              .eq('id', jobData.offer_id)
-              .maybeSingle();
+          try {
+            const clientData = await getUserById(jobData.client_id);
               
-            if (offerWithRequest?.requests?.location) {
-              clientLocation = offerWithRequest.requests.location;
+            // Tenter de récupérer l'adresse depuis la requête
+            let clientLocation = {
+              latitude: 48.8566,
+              longitude: 2.3522,
+              address: "Adresse du client"
+            };
+            
+            // Tenter de récupérer la requête via l'offre
+            if (jobData.offer_id) {
+              const { data: offerWithRequest } = await supabase
+                .from('offers')
+                .select(`
+                  request_id,
+                  requests:request_id(location)
+                `)
+                .eq('id', jobData.offer_id)
+                .maybeSingle();
+                
+              if (offerWithRequest?.requests?.location) {
+                clientLocation = offerWithRequest.requests.location;
+              }
             }
+            
+            setClient({
+              id: jobData.client_id,
+              name: clientData?.email?.split('@')[0] || 'Client',
+              location: clientLocation
+            });
+          } catch (clientError) {
+            console.error('Error fetching client details:', clientError);
+            
+            // Client par défaut si non trouvé
+            setClient({
+              id: jobData.client_id,
+              name: 'Client',
+              location: {
+                latitude: 48.8566,
+                longitude: 2.3522,
+                address: "Adresse du client"
+              }
+            });
           }
-          
-          setClient({
-            id: jobData.client_id,
-            name: clientData?.email?.split('@')[0] || 'Client',
-            location: clientLocation
-          });
         } else {
           // Client par défaut si non trouvé
           setClient({
@@ -269,27 +359,32 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
       return;
     }
     
-    // 2. Obtenir la position actuelle
+    // 2. Obtenir la position actuelle du prestataire et la mettre à jour en base de données
     try {
-      const currentLocation = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High
-      });
+      // Utiliser notre nouvelle fonction pour obtenir la position avec l'adresse
+      const initialLocation = await getCurrentPositionWithAddress();
       
-      const initialLocation = {
-        latitude: currentLocation.coords.latitude,
-        longitude: currentLocation.coords.longitude
-      };
+      if (!initialLocation) {
+        Alert.alert('Erreur', 'Impossible d\'obtenir votre position actuelle');
+        return;
+      }
       
+      // Mettre à jour l'état local
       setLocation(initialLocation);
       
-      // Simuler l'envoi des données de position (log uniquement)
-      console.log('Position prestataire initiale:', initialLocation);
+      // Mise à jour de la localisation du prestataire en base de données avec le nouveau service
+      try {
+        await updateUserLocation(user.id, initialLocation);
+        console.log('Position prestataire mise à jour en base de données:', initialLocation);
+      } catch (updateError) {
+        console.error('Error updating prestataire location in database:', updateError);
+      }
     } catch (error) {
       console.error('Error getting current position:', error);
       Alert.alert('Erreur', 'Impossible d\'obtenir votre position actuelle');
     }
     
-    // 3. Configurer le suivi périodique via watchPositionAsync (plus simple)
+    // 3. Configurer le suivi périodique via watchPositionAsync
     try {
       const watchPosition = await Location.watchPositionAsync(
         {
@@ -297,7 +392,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
           timeInterval: 5000, // 5 secondes
           distanceInterval: 10 // 10 mètres
         },
-        (newLocation) => {
+        async (newLocation) => {
           const position = {
             latitude: newLocation.coords.latitude,
             longitude: newLocation.coords.longitude
@@ -306,8 +401,55 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
           // Mettre à jour l'état local
           setLocation(position);
           
-          // Simuler l'envoi des données (log uniquement)
-          console.log('Nouvelle position prestataire:', position);
+          // Mise à jour de la localisation du prestataire en base de données avec le nouveau service
+          try {
+            await updateUserLocation(user.id, position);
+            console.log('Position prestataire mise à jour en base de données:', 
+              `Lat: ${position.latitude.toFixed(6)}, Long: ${position.longitude.toFixed(6)}`);
+              
+            // Si on est en mode "en route", mettre à jour le temps estimé d'arrivée
+            if (job?.tracking_status === 'en_route' && client?.location) {
+              // Utiliser notre nouveau service pour calculer la distance
+              const distanceValue = calculateDistance(
+                { latitude: position.latitude, longitude: position.longitude },
+                { latitude: client.location.latitude, longitude: client.location.longitude }
+              );
+              
+              // Utiliser notre nouveau service pour calculer l'ETA
+              const etaMinutes = calculateETA(distanceValue);
+              
+              // Formater l'affichage de l'ETA
+              if (etaMinutes <= 1) {
+                setRemainingTime('Moins d\'1 min');
+              } else if (etaMinutes < 60) {
+                setRemainingTime(`${etaMinutes} min`);
+              } else {
+                const hours = Math.floor(etaMinutes / 60);
+                const mins = etaMinutes % 60;
+                setRemainingTime(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+              }
+              
+              // Détecter automatiquement si le prestataire est arrivé (distance < 100m)
+              if (distanceValue < 0.1 && job.tracking_status === 'en_route') {
+                Alert.alert(
+                  'Destination proche',
+                  'Vous semblez être arrivé à destination. Souhaitez-vous mettre à jour votre statut?',
+                  [
+                    {
+                      text: 'Plus tard',
+                      style: 'cancel'
+                    },
+                    {
+                      text: 'Je suis arrivé',
+                      onPress: () => handleUpdateStatus(TrackingStatus.ARRIVED)
+                    }
+                  ]
+                );
+              }
+            }
+          } catch (updateError) {
+            console.error('Error updating prestataire location:', updateError);
+          }
         }
       );
       
@@ -317,22 +459,72 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
       console.error('Error setting up position watching:', error);
     }
     
-    // Simuler des mises à jour de position du client
-    if (job && client) {
-      // Au lieu d'essayer d'utiliser une table inexistante, on simule les données
-      console.log('Simulation de position du client...');
+    // 4. S'abonner aux mises à jour de position du client en temps réel
+    if (job && job.client_id) {
+      console.log(`Configuration du suivi en temps réel pour le client ${job.client_id}`);
       
-      // Générer une position légèrement différente pour le client toutes les 10 secondes
-      const clientUpdateInterval = setInterval(() => {
-        // On génère une petite variation aléatoire de la position
-        const randomLat = (Math.random() - 0.5) * 0.01; // variation de ±0.005 degrés
-        const randomLng = (Math.random() - 0.5) * 0.01;
+      // Configuration initiale avec la position actuelle du client ou une position par défaut
+      let initialClientLocation = client?.location || {
+        latitude: 48.8566, // Paris
+        longitude: 2.3522,
+        address: "Adresse du client"
+      };
+      
+      // Récupérer la position actuelle du client avec le nouveau service
+      try {
+        const clientLocation = await getUserLocation(job.client_id);
         
-        if (client && client.location) {
+        if (clientLocation) {
+          console.log('Position initiale du client récupérée:', clientLocation);
+          initialClientLocation = {
+            latitude: clientLocation.latitude,
+            longitude: clientLocation.longitude,
+            address: clientLocation.address || initialClientLocation.address
+          };
+          
+          // Mettre à jour l'état avec la position du client
+          setClient(prev => ({
+            ...prev!,
+            location: initialClientLocation
+          }));
+          
+          // Si on est en mode "en route", calculer l'ETA initial
+          if (job.tracking_status === 'en_route' && location) {
+            const distanceValue = calculateDistance(
+              { latitude: location.latitude, longitude: location.longitude },
+              { latitude: initialClientLocation.latitude, longitude: initialClientLocation.longitude }
+            );
+            
+            const etaMinutes = calculateETA(distanceValue);
+            
+            // Formater l'affichage de l'ETA
+            if (etaMinutes <= 1) {
+              setRemainingTime('Moins d\'1 min');
+            } else if (etaMinutes < 60) {
+              setRemainingTime(`${etaMinutes} min`);
+            } else {
+              const hours = Math.floor(etaMinutes / 60);
+              const mins = etaMinutes % 60;
+              setRemainingTime(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+            }
+          }
+        } else {
+          console.log('Aucune position du client trouvée, utilisation de la position par défaut');
+        }
+      } catch (error) {
+        console.error('Error fetching client location:', error);
+      }
+      
+      // S'abonner aux mises à jour de position du client avec le nouveau service
+      const unsubscribe = subscribeToUserLocation(job.client_id, (updatedLocation: UserLocation) => {
+        console.log('Mise à jour de position du client reçue:', updatedLocation);
+        
+        // Ne mettre à jour que si la position a changé
+        if (updatedLocation && updatedLocation.latitude && updatedLocation.longitude) {
           const newLocation = {
-            latitude: client.location.latitude + randomLat,
-            longitude: client.location.longitude + randomLng,
-            address: client.location.address
+            latitude: updatedLocation.latitude,
+            longitude: updatedLocation.longitude,
+            address: updatedLocation.address || client?.location?.address || "Adresse du client"
           };
           
           setClient(prev => ({
@@ -340,13 +532,57 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
             location: newLocation
           }));
           
-          console.log('Nouvelle position du client (simulée):', newLocation);
+          // Mettre à jour le temps d'arrivée estimé si on est en route
+          if (job.tracking_status === 'en_route' && location) {
+            const distanceValue = calculateDistance(
+              { latitude: location.latitude, longitude: location.longitude },
+              { latitude: newLocation.latitude, longitude: newLocation.longitude }
+            );
+            
+            const etaMinutes = calculateETA(distanceValue);
+            
+            // Formater l'affichage de l'ETA
+            if (etaMinutes <= 1) {
+              setRemainingTime('Moins d\'1 min');
+            } else if (etaMinutes < 60) {
+              setRemainingTime(`${etaMinutes} min`);
+            } else {
+              const hours = Math.floor(etaMinutes / 60);
+              const mins = etaMinutes % 60;
+              setRemainingTime(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+            }
+            
+            // Détecter automatiquement si le prestataire est arrivé (distance < 100m)
+            if (distanceValue < 0.1 && job.tracking_status === 'en_route') {
+              Alert.alert(
+                'Destination proche',
+                'Vous semblez être arrivé à destination. Souhaitez-vous mettre à jour votre statut?',
+                [
+                  {
+                    text: 'Plus tard',
+                    style: 'cancel'
+                  },
+                  {
+                    text: 'Je suis arrivé',
+                    onPress: () => handleUpdateStatus(TrackingStatus.ARRIVED)
+                  }
+                ]
+              );
+            }
+          }
         }
-      }, 10000); // Toutes les 10 secondes
+      });
       
       // Retourner une fonction de nettoyage
       return () => {
-        clearInterval(clientUpdateInterval);
+        console.log('Nettoyage des abonnements de localisation');
+        
+        // Se désabonner des mises à jour Realtime
+        if (unsubscribe) {
+          unsubscribe();
+        }
+        
+        // Nettoyer la surveillance de position
         if (watchId && typeof watchId === 'object' && 'remove' in watchId) {
           watchId.remove();
         }
@@ -358,8 +594,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
   const sendClientNotification = (status: TrackingStatus) => {
     const clientName = client?.name || 'Client';
     const prestataireName = user?.email?.split('@')[0] || 'Prestataire';
-    const serviceType = job?.requests?.service_id ? 
-      getServiceById(job.requests.service_id)?.name || 'service' : 'service';
+    const serviceType = service?.name || 'service';
     
     let message = '';
     
@@ -510,7 +745,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
           [
             {
               text: 'OK',
-              onPress: () => navigation.navigate('MyJobs')
+              onPress: () => navigation.navigate('PrestataireTabs', { screen: 'MyJobs' })
             }
           ]
         );
@@ -530,7 +765,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
           variant="primary"
           label="Mise à jour en cours..."
           loading={true}
-          className="mb-2"
+          style={styles.actionButton}
           disabled={true}
         />
       );
@@ -543,7 +778,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
             variant="primary"
             label="Démarrer la mission"
             icon={<Ionicons name="play" size={18} color="#fff" />}
-            className="mb-2"
+            style={styles.actionButton}
             onPress={() => handleUpdateStatus(TrackingStatus.EN_ROUTE)}
           />
         );
@@ -553,7 +788,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
             variant="primary"
             label="Je suis arrivé(e)"
             icon={<Ionicons name="location" size={18} color="#fff" />}
-            className="mb-2"
+            style={styles.actionButton}
             onPress={() => handleUpdateStatus(TrackingStatus.ARRIVED)}
           />
         );
@@ -563,7 +798,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
             variant="warning"
             label="Démarrer la prestation"
             icon={<Ionicons name="construct" size={18} color="#fff" />}
-            className="mb-2"
+            style={styles.actionButton}
             onPress={() => handleUpdateStatus(TrackingStatus.IN_PROGRESS)}
           />
         );
@@ -573,7 +808,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
             variant="success"
             label="Terminer la prestation"
             icon={<Ionicons name="checkmark-circle" size={18} color="#fff" />}
-            className="mb-2"
+            style={styles.actionButton}
             onPress={() => handleUpdateStatus(TrackingStatus.COMPLETED)}
           />
         );
@@ -583,7 +818,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
             variant="success"
             label="Mission terminée"
             disabled={true}
-            className="mb-2"
+            style={styles.actionButton}
           />
         );
       default:
@@ -637,6 +872,8 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Nous supprimons le header personnalisé car React Navigation en affiche déjà un */}
+      {/*
       <View style={styles.header}>
         <TouchableOpacity 
           style={styles.backIcon} 
@@ -652,6 +889,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
         </View>
         <StatusBadge status={job.tracking_status} />
       </View>
+      */}
       
       <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {/* Carte du client */}
@@ -676,7 +914,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
               </View>
               <TouchableOpacity 
                 style={styles.contactIcon}
-                onPress={() => Alert.alert('Contact', 'Fonctionnalité de chat disponible prochainement')}
+                onPress={() => navigation.navigate('Chat', { jobId: job.id })}
               >
                 <Ionicons name="chatbubble-outline" size={22} color={COLORS.primary} />
               </TouchableOpacity>
@@ -742,54 +980,143 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
         
         {/* Carte de localisation */}
         <Card style={styles.card}>
+          {/* Utiliser un titre plus discret pour éviter la confusion avec le header principal */}
           <View style={styles.sectionHeader}>
-            <Ionicons name="location" size={18} color={COLORS.primary} />
+            <Ionicons name="navigate" size={18} color={COLORS.primary} />
             <Text variant="h5" weight="semibold" style={styles.marginLeft}>
-              Suivi de localisation
+              Carte de navigation
             </Text>
           </View>
           
           {location && client?.location ? (
-            <View style={styles.locationContent}>
-              <View style={styles.positionGroup}>
-                <Text variant="body2" weight="medium" color="text-secondary" style={styles.marginBottomXs}>
-                  Votre position
-                </Text>
-                <View style={styles.coordinatesContainer}>
-                  <Text>
-                    {location.latitude.toFixed(5)}, {location.longitude.toFixed(5)}
+            <View>
+              {/* Carte interactive */}
+              <View style={styles.mapContainer}>
+                <MapView
+                  ref={mapRef}
+                  style={styles.map}
+                  initialRegion={{
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    latitudeDelta: 0.02,
+                    longitudeDelta: 0.02,
+                  }}
+                >
+                  {/* Marqueur pour le prestataire */}
+                  <Marker
+                    coordinate={{
+                      latitude: location.latitude,
+                      longitude: location.longitude
+                    }}
+                    title="Votre position"
+                    pinColor="blue"
+                  />
+
+                  {/* Marqueur pour le client */}
+                  <Marker
+                    coordinate={{
+                      latitude: client.location.latitude,
+                      longitude: client.location.longitude
+                    }}
+                    title="Client"
+                    pinColor="red"
+                  />
+                  
+                  {/* Ligne qui relie les deux points */}
+                  <Polyline
+                    coordinates={[
+                      { latitude: location.latitude, longitude: location.longitude },
+                      { latitude: client.location.latitude, longitude: client.location.longitude }
+                    ]}
+                    strokeColor="#007AFF"
+                    strokeWidth={3}
+                  />
+                </MapView>
+              </View>
+              
+              {/* Actions de la carte */}
+              <View style={styles.mapActions}>
+                {/* Bouton pour suivre votre position */}
+                <TouchableOpacity
+                  style={styles.mapButton}
+                  onPress={() => {
+                    if (location && mapRef.current) {
+                      try {
+                        mapRef.current.animateToRegion({
+                          latitude: location.latitude,
+                          longitude: location.longitude,
+                          latitudeDelta: 0.01,
+                          longitudeDelta: 0.01,
+                        }, 1000);
+                      } catch (e) {
+                        console.log('Erreur d\'animation:', e);
+                      }
+                    }
+                  }}
+                >
+                  <Ionicons name="locate" size={18} color={COLORS.primary} />
+                  <Text variant="caption" color="primary" style={styles.marginLeft}>
+                    Ma position
                   </Text>
-                </View>
+                </TouchableOpacity>
+                
+                {/* Bouton pour voir le client */}
+                <TouchableOpacity
+                  style={[styles.mapButton, styles.marginLeft]}
+                  onPress={() => {
+                    if (client?.location && mapRef.current) {
+                      try {
+                        mapRef.current.animateToRegion({
+                          latitude: client.location.latitude,
+                          longitude: client.location.longitude,
+                          latitudeDelta: 0.01,
+                          longitudeDelta: 0.01,
+                        }, 1000);
+                      } catch (e) {
+                        console.log('Erreur d\'animation:', e);
+                      }
+                    }
+                  }}
+                >
+                  <Ionicons name="home" size={18} color={COLORS.danger} />
+                  <Text variant="caption" color="danger" style={styles.marginLeft}>
+                    Position client
+                  </Text>
+                </TouchableOpacity>
               </View>
               
               <View style={styles.distanceContainer}>
                 <Ionicons name="resize" size={18} color={COLORS.primary} />
                 <Text variant="body1" weight="medium" color="primary" style={styles.marginLeft}>
-                  Distance: {calculateDistance(location, client.location)} km
+                  Distance: {calculateDistance(
+                    location.latitude,
+                    location.longitude,
+                    client.location.latitude,
+                    client.location.longitude
+                  )} km
                 </Text>
-              </View>
-              
-              <View style={styles.positionGroup}>
-                <Text variant="body2" weight="medium" color="text-secondary" style={styles.marginBottomXs}>
-                  Position du client
-                </Text>
-                <View style={styles.coordinatesContainer}>
-                  <Text>
-                    {client.location.latitude.toFixed(5)}, {client.location.longitude.toFixed(5)}
-                  </Text>
-                </View>
               </View>
               
               <View style={styles.legendContainer}>
                 <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.primary }]} />
+                  <View style={[styles.legendDot, { backgroundColor: "blue" }]} />
                   <Text variant="body2">Vous</Text>
                 </View>
                 <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.danger }]} />
+                  <View style={[styles.legendDot, { backgroundColor: "red" }]} />
                   <Text variant="body2">Client</Text>
                 </View>
               </View>
+              
+              {/* Bloc optionnel d'arrivée estimée quand en route */}
+              {job.tracking_status === TrackingStatus.EN_ROUTE && (
+                <View style={styles.etaContainer}>
+                  <Ionicons name="time-outline" size={20} color={COLORS.info} style={styles.marginRight} />
+                  <Text variant="body1" weight="medium">
+                    Arrivée estimée dans <Text color="primary">{remainingTime || '10 min'}</Text>
+                  </Text>
+                </View>
+              )}
             </View>
           ) : (
             <View style={styles.loadingPositionContainer}>
@@ -815,13 +1142,13 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
               <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
                 Type de service:
               </Text>
-              <Text variant="body2">{job.requests?.service_id ? getServiceById(job.requests.service_id)?.name : 'Plomberie'}</Text>
+              <Text variant="body2">{service?.name || job.requests?.services?.name || 'Service'}</Text>
             </View>
             <View style={styles.detailRow}>
               <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
                 Client:
               </Text>
-              <Text variant="body2">{getClientById(job.client_id).name}</Text>
+              <Text variant="body2">{client?.name || 'Client'}</Text>
             </View>
             <View style={styles.detailRow}>
               <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
@@ -837,7 +1164,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
                 Description:
               </Text>
               <Text variant="body2" style={styles.flex1}>
-                {job.requests?.notes || "Fuite sous l'évier de la cuisine à réparer"}
+                {job.requests?.notes || "Demande de service"}
               </Text>
             </View>
             <View style={styles.detailRow}>
@@ -845,7 +1172,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
                 Montant:
               </Text>
               <Text variant="body2" weight="medium" color="success">
-                {job.offers?.price || '85,00'} €
+                {job.offers?.price || '0,00'} €
               </Text>
             </View>
           </View>
@@ -861,6 +1188,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
           label="Assistance"
           icon={<Ionicons name="help-circle-outline" size={20} color={COLORS.primary} />}
           onPress={() => Alert.alert('Assistance', 'Fonctionnalité d\'assistance disponible prochainement')}
+          style={styles.assistanceButton}
         />
       </View>
     </SafeAreaView>
@@ -953,6 +1281,39 @@ const styles = StyleSheet.create({
   locationContent: {
     marginTop: SPACING.sm,
   },
+  // Styles pour la carte
+  mapContainer: {
+    overflow: 'hidden',
+    height: 200,
+    borderRadius: BORDER_RADIUS.md,
+    marginVertical: SPACING.sm,
+  },
+  map: {
+    width: '100%',
+    height: '100%',
+  },
+  mapActions: {
+    flexDirection: 'row',
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
+  mapButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${COLORS.primary}15`,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 6,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  etaContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: `${COLORS.info}15`,
+    paddingVertical: SPACING.md,
+    marginTop: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+  },
   positionGroup: {
     marginBottom: SPACING.md,
   },
@@ -973,10 +1334,11 @@ const styles = StyleSheet.create({
   legendContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: SPACING.md,
-    paddingTop: SPACING.md,
+    marginVertical: SPACING.sm,
+    paddingVertical: SPACING.sm,
     borderTopWidth: 1,
-    borderTopColor: COLORS.border,
+    borderBottomWidth: 1,
+    borderColor: COLORS.border,
   },
   legendItem: {
     flexDirection: 'row',
@@ -1022,6 +1384,12 @@ const styles = StyleSheet.create({
   },
   marginBottom: {
     marginBottom: SPACING.xl,
+  },
+  actionButton: {
+    marginBottom: SPACING.md,
+  },
+  assistanceButton: {
+    marginTop: SPACING.sm,
   },
   flex1: {
     flex: 1,
