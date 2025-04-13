@@ -26,6 +26,9 @@ export const COLORS = {
   dark: '#1A1A1A',
   input: '#F2F2F2',
   card: '#FFFFFF',
+  green: '#34C759',
+  red: '#FF3B30',
+  lightRed: '#FFEEEE',
 };
 
 export const SIZES = {
@@ -79,6 +82,8 @@ export const FONTS = {
   body1: { fontFamily: 'System', fontSize: SIZES.body1, lineHeight: 24 },
   body2: { fontFamily: 'System', fontSize: SIZES.body2, lineHeight: 22 },
   body3: { fontFamily: 'System', fontSize: SIZES.body3, lineHeight: 18 },
+  body4: { fontFamily: 'System', fontSize: SIZES.body2 - 2, lineHeight: 20 },
+  body5: { fontFamily: 'System', fontSize: SIZES.body3 - 2, lineHeight: 16 },
   caption: { fontFamily: 'System', fontSize: SIZES.caption, lineHeight: 14 }
 };
 

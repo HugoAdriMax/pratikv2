@@ -1,233 +1,323 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
-  Text,
   StyleSheet,
-  TextInput,
   TouchableOpacity,
-  ActivityIndicator,
   Alert,
-  ScrollView
+  Text as RNText,
+  TextInput,
+  SafeAreaView,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform
 } from 'react-native';
-import { createReview } from '../../services/api';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { Button } from '../../components/ui';
+import { createReview, getJobByOfferId } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-
-// Simple composant pour l'affichage des étoiles
-const StarRating = ({ rating, setRating }: { rating: number; setRating: (rating: number) => void }) => {
-  return (
-    <View style={styles.starsContainer}>
-      {[1, 2, 3, 4, 5].map(star => (
-        <TouchableOpacity
-          key={star}
-          onPress={() => setRating(star)}
-        >
-          <Text style={[styles.star, star <= rating ? styles.starFilled : styles.starEmpty]}>
-            ★
-          </Text>
-        </TouchableOpacity>
-      ))}
-    </View>
-  );
-};
+import { COLORS, SPACING, SHADOWS, BORDER_RADIUS } from '../../utils/theme';
+import supabase from '../../config/supabase';
 
 const ReviewScreen = ({ route, navigation }: any) => {
-  const { jobId } = route.params;
+  const { jobId, requestId } = route.params;
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState('');
   const [loading, setLoading] = useState(false);
+  const [loadingJob, setLoadingJob] = useState(true);
+  const [job, setJob] = useState(null);
   const { user } = useAuth();
-
-  const handleSubmitReview = async () => {
-    if (!user) return;
+  const insets = useSafeAreaInsets();
+  
+  useEffect(() => {
+    const fetchJobDetails = async () => {
+      try {
+        setLoadingJob(true);
+        
+        if (!jobId) {
+          // Cas de test
+          setJob({
+            id: 'test',
+            prestataire_id: 'test-prestataire',
+            prestataires: {
+              name: 'Prestataire Test',
+              email: 'test@example.com'
+            }
+          });
+          return;
+        }
+        
+        const jobData = await getJobByOfferId(jobId);
+        setJob(jobData);
+      } catch (error) {
+        console.error('Error fetching job details:', error);
+        Alert.alert('Erreur', 'Impossible de récupérer les détails de la mission');
+      } finally {
+        setLoadingJob(false);
+      }
+    };
     
-    if (rating === 0) {
-      Alert.alert('Erreur', 'Veuillez sélectionner une note');
+    fetchJobDetails();
+  }, [jobId]);
+  
+  const handleSubmitReview = async () => {
+    if (!job || !user) {
+      Alert.alert('Erreur', 'Données manquantes pour créer une évaluation');
       return;
     }
     
     try {
       setLoading(true);
       
-      await createReview({
-        job_id: jobId,
-        reviewer_id: user.id,
-        rating,
-        comment
-      });
+      if (job.id === 'test') {
+        // Simulation pour les tests
+        Alert.alert('Test', `Évaluation: ${rating} étoiles, Commentaire: ${comment}`);
+      } else {
+        // Utiliser la fonction normale pour les jobs réels
+        await createReview({
+          job_id: job.id,
+          reviewer_id: user.id,
+          reviewed_user_id: job.prestataire_id,
+          rating,
+          comment
+        });
+        
+        // React Native n'a pas localStorage, utilisons AsyncStorage dans un projet réel
+        // Cet exemple montre le concept, mais ne fonctionnera pas tel quel
+        try {
+          // Dans un vrai projet, on utiliserait:
+          // import AsyncStorage from '@react-native-async-storage/async-storage';
+          // const reviewedRequests = JSON.parse(await AsyncStorage.getItem('reviewedRequests') || '[]');
+          // await AsyncStorage.setItem('reviewedRequests', JSON.stringify(reviewedRequests));
+          console.log('Avis soumis pour la demande:', requestId);
+        } catch (e) {
+          console.log('Note: le stockage local n\'est pas implémenté dans ce prototype', e);
+        }
+      }
       
+      // Marquer l'écran précédent comme ayant été évalué en passant un paramètre
       Alert.alert(
         'Merci pour votre évaluation !',
         'Votre évaluation a été enregistrée avec succès.',
         [
           {
             text: 'OK',
-            onPress: () => navigation.navigate('Requests')
+            onPress: () => {
+              // Retourner au détail de la demande avec un paramètre indiquant qu'il a été évalué
+              navigation.navigate({
+                name: 'RequestDetail',
+                params: { requestId: route.params?.requestId, hasBeenReviewed: true },
+                merge: true,
+              })
+            }
           }
         ]
       );
     } catch (error) {
       console.error('Error submitting review:', error);
-      Alert.alert('Erreur', 'Impossible d\'enregistrer votre évaluation');
+      Alert.alert('Erreur', 'Impossible d\'enregistrer votre évaluation: ' + (error.message || 'Erreur inconnue'));
     } finally {
       setLoading(false);
     }
   };
 
+  // Composant pour l'affichage des étoiles
+  const StarRating = () => {
+    return (
+      <View style={styles.starsContainer}>
+        {[1, 2, 3, 4, 5].map(star => (
+          <TouchableOpacity
+            key={star}
+            onPress={() => setRating(star)}
+            style={styles.starButton}
+          >
+            <Ionicons 
+              name={star <= rating ? 'star' : 'star-outline'} 
+              size={36} 
+              color="#FFB800" 
+            />
+          </TouchableOpacity>
+        ))}
+      </View>
+    );
+  };
+
+  const getRatingText = () => {
+    switch(rating) {
+      case 1: return 'Très insatisfait';
+      case 2: return 'Insatisfait';
+      case 3: return 'Correct';
+      case 4: return 'Satisfait';
+      case 5: return 'Très satisfait';
+      default: return '';
+    }
+  };
+
   return (
-    <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Évaluer la prestation</Text>
-      </View>
-      
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Votre satisfaction globale</Text>
-        <Text style={styles.ratingLabel}>Comment évaluez-vous cette prestation ?</Text>
-        
-        <StarRating rating={rating} setRating={setRating} />
-        
-        <Text style={styles.ratingText}>
-          {rating === 1 && 'Très insatisfait'}
-          {rating === 2 && 'Insatisfait'}
-          {rating === 3 && 'Correct'}
-          {rating === 4 && 'Satisfait'}
-          {rating === 5 && 'Très satisfait'}
-        </Text>
-      </View>
-      
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Commentaire (optionnel)</Text>
-        <TextInput
-          style={styles.commentInput}
-          value={comment}
-          onChangeText={setComment}
-          placeholder="Partagez votre expérience..."
-          multiline
-          numberOfLines={4}
-        />
-      </View>
-      
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity
-          style={styles.skipButton}
-          onPress={() => navigation.navigate('Requests')}
-          disabled={loading}
+    <SafeAreaView style={styles.container}>
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.keyboardView}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
+      >
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
         >
-          <Text style={styles.skipButtonText}>
-            Passer
-          </Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity
-          style={styles.submitButton}
-          onPress={handleSubmitReview}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Text style={styles.submitButtonText}>
-              Envoyer mon évaluation
-            </Text>
-          )}
-        </TouchableOpacity>
-      </View>
-    </ScrollView>
+          {/* Zone du commentaire */}
+          <View style={styles.section}>
+            <RNText style={styles.sectionTitle}>Commentaire (optionnel)</RNText>
+            <View style={styles.textInputContainer}>
+              <TextInput
+                style={styles.textInput}
+                placeholder="Partagez votre expérience..."
+                placeholderTextColor={COLORS.textSecondary}
+                multiline
+                numberOfLines={5}
+                value={comment}
+                onChangeText={setComment}
+                blurOnSubmit={false}
+              />
+            </View>
+          </View>
+          
+          {/* Zone d'évaluation par étoiles */}
+          <View style={styles.section}>
+            <RNText style={styles.sectionTitle}>Votre satisfaction</RNText>
+            <RNText style={styles.sectionSubtitle}>
+              Comment évaluez-vous cette prestation ?
+            </RNText>
+            
+            <StarRating />
+            
+            <RNText style={styles.ratingText}>
+              {getRatingText()}
+            </RNText>
+          </View>
+          
+          {/* Boutons d'action */}
+          <View style={styles.buttonsContainer}>
+            <TouchableOpacity 
+              style={styles.skipButton}
+              onPress={() => navigation.navigate('ClientTabs', { screen: 'Requests' })}
+              disabled={loading}
+            >
+              <RNText style={styles.skipButtonText}>Passer</RNText>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={styles.submitButton}
+              onPress={handleSubmitReview}
+              disabled={loading}
+            >
+              <RNText style={styles.submitButtonText}>
+                {loading ? 'Envoi en cours...' : 'Envoyer mon évaluation'}
+              </RNText>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#F7F8FA',
   },
-  header: {
-    backgroundColor: '#fff',
+  keyboardView: {
+    flex: 1,
+  },
+  scrollContent: {
     padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
   },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-  },
-  card: {
-    backgroundColor: '#fff',
-    margin: 16,
+  section: {
+    backgroundColor: 'white',
+    borderRadius: 12,
     padding: 16,
-    borderRadius: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
     marginBottom: 16,
+    shadowColor: "#000",
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 3,
   },
-  ratingLabel: {
-    fontSize: 16,
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#2A2D34',
     marginBottom: 12,
+  },
+  sectionSubtitle: {
+    fontSize: 15,
+    color: '#737987',
+    marginBottom: 16,
     textAlign: 'center',
+  },
+  textInputContainer: {
+    borderWidth: 1.5,
+    borderColor: '#E1E3EA',
+    borderRadius: 8,
+    backgroundColor: '#F7F8FA',
+  },
+  textInput: {
+    padding: 12,
+    fontSize: 16,
+    color: '#2A2D34',
+    minHeight: 120,
+    textAlignVertical: 'top',
   },
   starsContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
     marginVertical: 16,
   },
-  star: {
-    fontSize: 40,
-    marginHorizontal: 8,
-  },
-  starEmpty: {
-    color: '#ddd',
-  },
-  starFilled: {
-    color: '#FFD700', // Gold color for stars
+  starButton: {
+    padding: 6,
   },
   ratingText: {
-    textAlign: 'center',
     fontSize: 16,
     fontWeight: '500',
+    color: '#4C6FFF',
+    textAlign: 'center',
     marginTop: 8,
   },
-  commentInput: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 12,
-    height: 120,
-    textAlignVertical: 'top',
-  },
-  buttonContainer: {
+  buttonsContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    margin: 16,
+    marginBottom: 32,
   },
   skipButton: {
     flex: 1,
-    backgroundColor: '#6c757d',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
+    backgroundColor: 'white',
+    borderWidth: 1.5,
+    borderColor: '#4C6FFF',
+    borderRadius: 10,
+    padding: 14,
     marginRight: 8,
+    alignItems: 'center',
   },
   skipButtonText: {
-    color: '#fff',
-    fontWeight: 'bold',
+    color: '#4C6FFF',
+    fontWeight: '600',
+    fontSize: 15,
   },
   submitButton: {
     flex: 2,
-    backgroundColor: '#28a745',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
+    backgroundColor: '#4C6FFF',
+    borderRadius: 10,
+    padding: 14,
     marginLeft: 8,
+    alignItems: 'center',
   },
   submitButtonText: {
-    color: '#fff',
-    fontWeight: 'bold',
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 15,
   },
 });
 

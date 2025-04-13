@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Client Prestations",
-    "slug": "client-prestations",
+    "name": "Pratikk",
+    "slug": "pratikk",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -11,16 +11,15 @@
       "tsconfigPaths": true
     },
     "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#1249b6"
     },
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yourcompany.clientprestations",
+      "bundleIdentifier": "com.pratikv2.app",
+      "buildNumber": "1.0.0",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Cette application a besoin d'accéder à votre position pour vous mettre en relation avec des prestataires à proximité.",
         "NSLocationAlwaysUsageDescription": "Cette application a besoin d'accéder à votre position pour vous mettre en relation avec des prestataires à proximité, même en arrière-plan.",
@@ -32,7 +31,8 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.yourcompany.clientprestations",
+      "package": "com.pratikv2.app",
+      "versionCode": 1,
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -69,9 +69,7 @@
       ]
     ],
     "extra": {
-      "eas": {
-        "projectId": "your-project-id"
-      }
-    }
+    },
+    "owner": "maxlevy"
   }
 }

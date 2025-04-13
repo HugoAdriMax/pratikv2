@@ -13,18 +13,19 @@ import { COLORS, SHADOWS, SPACING, BORDER_RADIUS } from '../../utils/theme';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { getJobByOfferId, updateJobTrackingStatus, completeJob } from '../../services/api';
+import { getJobByOfferId, updateJobTrackingStatus, completeJob, getUserReviewStats } from '../../services/api';
 import { Job, TrackingStatus } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { Text, Card, Button, Badge, Avatar } from '../../components/ui';
 import supabase from '../../config/supabase';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { 
   calculateDistance as calcDistance, 
   updateUserLocation,
   subscribeToUserLocation,
   calculateETA,
   getUserLocation,
+  getClientAddressFromRequest,
   UserLocation
 } from '../../services/location';
 
@@ -55,7 +56,7 @@ const StatusBadge = ({ status }: { status: TrackingStatus }) => {
       variant={variant as any} 
       label={label} 
       size="md"
-      className="px-3 py-1"
+      border
     />
   );
 };
@@ -70,19 +71,151 @@ const TrackingScreen = ({ route, navigation }: any) => {
   
   const [job, setJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
-  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  // Initialiser userLocation avec des valeurs par défaut
+  const [userLocation, setUserLocation] = useState<{ 
+    latitude: number; 
+    longitude: number;
+    address?: string;
+  }>({
+    latitude: 48.8683356,
+    longitude: 2.288925,
+    address: "74 bis rue Lauriston, 75016 Paris"
+  });
+  
+  // Initialiser prestataire avec des valeurs par défaut
   const [prestataire, setPrestataire] = useState<{
     id: string;
     name: string;
     avatar?: string;
-    location?: { latitude: number; longitude: number };
-  } | null>(null);
+    location: { 
+      latitude: number; 
+      longitude: number;
+      address?: string;
+    };
+    reviewStats?: {
+      average_rating: number;
+      review_count: number;
+    };
+  }>({
+    id: 'default-prestataire',
+    name: 'Prestataire',
+    location: {
+      latitude: 48.8639,
+      longitude: 2.2870,
+      address: "5 rue des Sablons, 75016 Paris"
+    }
+  });
   const [submitting, setSubmitting] = useState(false);
   const [watchId, setWatchId] = useState<any>(null);
   const [eta, setEta] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchJobDetails();
+    // Fonction pour récupérer les détails et définir les positions
+    const fetchDetailsAndSetPositions = async () => {
+      // D'abord récupérer les détails du job
+      const jobData = await fetchJobDetails();
+      
+      if (jobData) {
+        try {
+          // Récupérer l'adresse du client depuis sa demande
+          if (jobData.offers && jobData.offers.request_id) {
+            const clientAddress = await getClientAddressFromRequest(jobData.offers.request_id);
+            
+            if (clientAddress) {
+              console.log("Adresse du client récupérée depuis la demande:", clientAddress);
+              setUserLocation(clientAddress);
+              
+              // Mettre à jour la position du client dans la base de données pour référence
+              if (user && user.id) {
+                await updateUserLocation(user.id, clientAddress);
+              }
+            } else {
+              console.log("Aucune adresse trouvée dans la demande, utilisation de l'adresse par défaut");
+              // Utiliser l'adresse par défaut si aucune adresse n'est trouvée
+              const clientDefaultLocation = {
+                latitude: 48.8683356,
+                longitude: 2.288925,
+                address: "74 bis rue Lauriston, 75016 Paris"
+              };
+              setUserLocation(clientDefaultLocation);
+            }
+          } else {
+            console.log("Impossible de trouver la demande associée au job, utilisation de l'adresse par défaut");
+            // Utiliser l'adresse par défaut si aucune demande n'est trouvée
+            const clientDefaultLocation = {
+              latitude: 48.8683356,
+              longitude: 2.288925,
+              address: "74 bis rue Lauriston, 75016 Paris"
+            };
+            setUserLocation(clientDefaultLocation);
+          }
+        } catch (error) {
+          console.error("Erreur lors de la récupération de l'adresse du client:", error);
+          // Utiliser l'adresse par défaut en cas d'erreur
+          const clientDefaultLocation = {
+            latitude: 48.8683356,
+            longitude: 2.288925,
+            address: "74 bis rue Lauriston, 75016 Paris"
+          };
+          setUserLocation(clientDefaultLocation);
+        }
+      }
+      
+      // Définir la position fixe du prestataire
+      // Récupérer le prestataire avec ses vraies informations
+      const fetchPrestataireDetails = async () => {
+        if (job && job.prestataire_id) {
+          try {
+            const { data, error } = await supabase
+              .from('users')
+              .select('id, email, name, profile_picture, profile_picture_base64')
+              .eq('id', job.prestataire_id)
+              .single();
+            
+            if (error) throw error;
+            
+            // Récupérer les statistiques de reviews du prestataire
+            const reviewStats = await getUserReviewStats(job.prestataire_id);
+            
+            setPrestataire(prev => {
+              return {
+                ...prev!,
+                id: data.id,
+                name: data.name || data.email?.split('@')[0] || 'Prestataire',
+                avatar: data.profile_picture_base64 
+                  ? data.profile_picture_base64 
+                  : data.profile_picture,
+                location: {
+                  latitude: 48.8639, // 5 rue des Sablons
+                  longitude: 2.2870
+                },
+                reviewStats: {
+                  average_rating: reviewStats?.average_rating || 0,
+                  review_count: reviewStats?.review_count || 0
+                }
+              };
+            });
+          } catch (error) {
+            console.error('Erreur lors de la récupération des informations du prestataire:', error);
+            // Valeurs par défaut en cas d'erreur
+            setPrestataire(prev => {
+              return {
+                ...prev!,
+                location: {
+                  latitude: 48.8639,
+                  longitude: 2.2870
+                }
+              };
+            });
+          }
+        }
+      };
+      
+      fetchPrestataireDetails();
+    };
+    
+    // Exécuter la fonction
+    fetchDetailsAndSetPositions();
     
     // Lancer le tracking une fois la première fois
     const trackingCleanup = setupLocationTracking();
@@ -91,6 +224,64 @@ const TrackingScreen = ({ route, navigation }: any) => {
     const statusRefreshInterval = setInterval(() => {
       console.log('Rafraîchissement automatique du statut de la mission...');
       fetchJobDetails();
+      
+      // Réappliquer les positions fixes après chaque rafraîchissement
+      setUserLocation({
+        latitude: 48.8683356,
+        longitude: 2.288925,
+        address: "74 bis rue Lauriston, 75016 Paris"
+      });
+      
+      // Récupérer le prestataire avec ses vraies informations
+      const fetchPrestataireDetails = async () => {
+        if (job && job.prestataire_id) {
+          try {
+            const { data, error } = await supabase
+              .from('users')
+              .select('id, email, name, profile_picture, profile_picture_base64')
+              .eq('id', job.prestataire_id)
+              .single();
+            
+            if (error) throw error;
+            
+            // Récupérer les statistiques de reviews du prestataire
+            const reviewStats = await getUserReviewStats(job.prestataire_id);
+            
+            setPrestataire(prev => {
+              return {
+                ...prev!,
+                id: data.id,
+                name: data.name || data.email?.split('@')[0] || 'Prestataire',
+                avatar: data.profile_picture_base64 
+                  ? data.profile_picture_base64 
+                  : data.profile_picture,
+                location: {
+                  latitude: 48.8639, // 5 rue des Sablons
+                  longitude: 2.2870
+                },
+                reviewStats: {
+                  average_rating: reviewStats?.average_rating || 0,
+                  review_count: reviewStats?.review_count || 0
+                }
+              };
+            });
+          } catch (error) {
+            console.error('Erreur lors de la récupération des informations du prestataire:', error);
+            // Valeurs par défaut en cas d'erreur
+            setPrestataire(prev => {
+              return {
+                ...prev!,
+                location: {
+                  latitude: 48.8639,
+                  longitude: 2.2870
+                }
+              };
+            });
+          }
+        }
+      };
+      
+      fetchPrestataireDetails();
     }, 15000); // Rafraîchir toutes les 15 secondes
     
     // Nettoyage à la sortie
@@ -143,7 +334,7 @@ const TrackingScreen = ({ route, navigation }: any) => {
         if (!offerData) {
           console.log('Offre introuvable également. Création de données simulées.');
           
-          setJob({
+          const simulatedJob = {
             id: 'simulated-job-' + Date.now(),
             offer_id: offerId,
             client_id: user?.id || 'client-123',
@@ -151,7 +342,9 @@ const TrackingScreen = ({ route, navigation }: any) => {
             tracking_status: 'not_started',
             is_completed: false,
             created_at: new Date().toISOString()
-          });
+          };
+          
+          setJob(simulatedJob);
           
           // Récupérer les infos du prestataire (simulé pour l'exemple)
           setPrestataire({
@@ -165,6 +358,8 @@ const TrackingScreen = ({ route, navigation }: any) => {
           
           // Simuler un ETA
           setEta('15-20 min');
+          
+          return simulatedJob;
         } else {
           console.log('Offre trouvée, vérification du statut dans la requête:', offerData);
           
@@ -179,7 +374,7 @@ const TrackingScreen = ({ route, navigation }: any) => {
           }
           
           // Créer un job virtuel basé sur les informations de l'offre et de la requête
-          setJob({
+          const virtualJob = {
             id: 'job-for-' + offerId,
             offer_id: offerId,
             client_id: user?.id || offerData.requests?.client_id || 'client-123',
@@ -189,7 +384,9 @@ const TrackingScreen = ({ route, navigation }: any) => {
             created_at: offerData.created_at || new Date().toISOString(),
             offers: offerData,
             requests: offerData.requests
-          });
+          };
+          
+          setJob(virtualJob);
           
           // Obtenir les informations du prestataire
           if (offerData.prestataire_id) {
@@ -199,21 +396,46 @@ const TrackingScreen = ({ route, navigation }: any) => {
               .eq('id', offerData.prestataire_id)
               .maybeSingle();
               
+            // Récupérer les vraies informations du prestataire
+            const { data: prestataireInfo, error: prestataireError } = await supabase
+              .from('users')
+              .select('id, email, name, profile_picture, profile_picture_base64')
+              .eq('id', offerData.prestataire_id)
+              .single();
+            
+            if (prestataireError) {
+              console.error('Erreur lors de la récupération des informations du prestataire:', prestataireError);
+            }
+            
+            // Récupérer les statistiques de reviews du prestataire
+            const reviewStats = await getUserReviewStats(offerData.prestataire_id);
+            
+            // Récupérer la position réelle du prestataire
+            const prestataireLocation = await getUserLocation(offerData.prestataire_id);
+            
             setPrestataire({
               id: offerData.prestataire_id,
-              name: prestataireData?.email?.split('@')[0] || 'Prestataire',
-              location: {
-                latitude: 48.8566, // Paris
-                longitude: 2.3522
+              name: prestataireInfo?.name || prestataireInfo?.email?.split('@')[0] || 'Prestataire',
+              avatar: prestataireInfo?.profile_picture_base64 
+                ? prestataireInfo.profile_picture_base64 
+                : prestataireInfo?.profile_picture,
+              location: prestataireLocation || {
+                latitude: 48.8639, // 5 rue des Sablons (position par défaut)
+                longitude: 2.2870
+              },
+              reviewStats: {
+                average_rating: reviewStats?.average_rating || 0,
+                review_count: reviewStats?.review_count || 0
               }
             });
           } else {
+            // Utiliser un prestataire par défaut si on n'a pas trouvé celui de l'offre
             setPrestataire({
               id: 'prestataire-123',
-              name: 'Thomas Martin',
+              name: 'Prestataire par défaut',
               location: {
-                latitude: 48.8566, // Paris
-                longitude: 2.3522
+                latitude: 48.8639, // 5 rue des Sablons
+                longitude: 2.2870
               }
             });
           }
@@ -230,30 +452,60 @@ const TrackingScreen = ({ route, navigation }: any) => {
           } else {
             setEta('En attente');
           }
+          
+          return virtualJob;
         }
       } else {
         console.log('Job trouvé dans la base de données:', jobData);
         setJob(jobData);
         
-        // Récupérer les infos du prestataire du job
-        const { data: prestataireData } = await supabase
+        // Récupérer les vraies informations du prestataire
+        const { data: prestataireInfo, error: prestataireError } = await supabase
           .from('users')
-          .select('id, email')
+          .select('id, email, name, profile_picture, profile_picture_base64')
           .eq('id', jobData.prestataire_id)
-          .maybeSingle();
-          
+          .single();
+        
+        if (prestataireError) {
+          console.error('Erreur lors de la récupération des informations du prestataire:', prestataireError);
+        }
+        
+        // Récupérer les statistiques de reviews du prestataire
+        const reviewStats = await getUserReviewStats(jobData.prestataire_id);
+        
+        // Récupérer la position réelle du prestataire
+        const prestataireLocation = await getUserLocation(jobData.prestataire_id);
+        
         setPrestataire({
           id: jobData.prestataire_id,
-          name: prestataireData?.email?.split('@')[0] || 'Prestataire',
-          location: {
-            latitude: 48.8566, // Paris
-            longitude: 2.3522
+          name: prestataireInfo?.name || prestataireInfo?.email?.split('@')[0] || 'Prestataire',
+          avatar: prestataireInfo?.profile_picture_base64 
+            ? prestataireInfo.profile_picture_base64 
+            : prestataireInfo?.profile_picture,
+          location: prestataireLocation || {
+            latitude: 48.8639, // 5 rue des Sablons (position par défaut)
+            longitude: 2.2870
+          },
+          reviewStats: {
+            average_rating: reviewStats?.average_rating || 0,
+            review_count: reviewStats?.review_count || 0
           }
         });
         
-        // Simuler un ETA basé sur le statut
-        if (jobData.tracking_status === 'en_route') {
-          setEta('15-20 min');
+        // Déterminer l'ETA basé sur le statut et la distance
+        if (jobData.tracking_status === 'en_route' && userLocation && prestataire?.location) {
+          const distance = calcDistance(userLocation, prestataire.location);
+          const etaMinutes = calculateETA(distance);
+          
+          if (etaMinutes <= 1) {
+            setEta('Moins d\'1 min');
+          } else if (etaMinutes < 60) {
+            setEta(`${etaMinutes} min`);
+          } else {
+            const hours = Math.floor(etaMinutes / 60);
+            const mins = etaMinutes % 60;
+            setEta(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+          }
         } else if (jobData.tracking_status === 'arrived') {
           setEta('Arrivé');
         } else if (jobData.tracking_status === 'in_progress') {
@@ -263,10 +515,13 @@ const TrackingScreen = ({ route, navigation }: any) => {
         } else {
           setEta('En attente');
         }
+        
+        return jobData;
       }
     } catch (error) {
       console.error('Error fetching job details:', error);
       Alert.alert('Erreur', 'Impossible de récupérer les détails de la mission');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -275,176 +530,79 @@ const TrackingScreen = ({ route, navigation }: any) => {
   const setupLocationTracking = async () => {
     if (!user) return;
     
-    // 1. Demander les permissions de localisation (foreground seulement)
-    const { status } = await Location.requestForegroundPermissionsAsync();
+    console.log("Configuration du suivi de localisation en temps réel");
     
-    if (status !== 'granted') {
-      Alert.alert('Permission refusée', 'Nous avons besoin de votre position pour le suivi');
-      return;
-    }
+    // Note: La position du client est déjà définie dans fetchDetailsAndSetPositions
+    // à partir de l'adresse enregistrée dans la demande
     
-    // 2. Obtenir la position actuelle du client 
-    try {
-      const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High
-      });
-      
-      const currentLocation = {
-        latitude: location.coords.latitude,
-        longitude: location.coords.longitude
+    // S'assurer que la position du client est bien enregistrée dans la base de données
+    if (userLocation) {
+      try {
+        await updateUserLocation(user.id, userLocation);
+        console.log('Position client mise à jour dans la base de données:', userLocation);
+      } catch (error) {
+        console.error('Erreur lors de la mise à jour de la position client dans la base de données:', error);
+      }
+    } else {
+      console.log("Position du client non disponible, utilisation des coordonnées par défaut");
+      // Utiliser les coordonnées par défaut si aucune position n'est disponible
+      const clientDefaultLocation = {
+        latitude: 48.8683356,
+        longitude: 2.288925,
+        address: "74 bis rue Lauriston, 75016 Paris",
+        formattedAddress: "74 bis rue Lauriston, 75016 Paris"
       };
       
-      // Obtenir l'adresse pour l'affichage
-      try {
-        const addressResponse = await Location.reverseGeocodeAsync({
-          latitude: currentLocation.latitude,
-          longitude: currentLocation.longitude
-        });
-        
-        if (addressResponse && addressResponse.length > 0) {
-          const addressObj = addressResponse[0];
-          const addressStr = [
-            addressObj.name,
-            addressObj.street,
-            addressObj.postalCode,
-            addressObj.city
-          ].filter(Boolean).join(', ');
-          
-          currentLocation.address = addressStr;
-        }
-      } catch (addressError) {
-        console.error('Error getting address:', addressError);
-      }
+      setUserLocation(clientDefaultLocation);
       
-      // Mettre à jour l'état local
-      setUserLocation(currentLocation);
-      
-      // Mise à jour de la localisation du client en base de données avec le nouveau service
       try {
-        await updateUserLocation(user.id, currentLocation);
-        console.log('Position client mise à jour en base de données');
+        await updateUserLocation(user.id, clientDefaultLocation);
+        console.log('Position client par défaut mise à jour dans la base de données');
       } catch (error) {
-        console.error('Error updating client location in database:', error);
+        console.error('Erreur lors de la mise à jour de la position client dans la base de données:', error);
       }
-      
-    } catch (error) {
-      console.error('Error getting current position:', error);
-      Alert.alert('Erreur', 'Impossible d\'obtenir votre position actuelle');
-    }
-    
-    // 3. Configurer le suivi périodique via watchPositionAsync
-    try {
-      const watchPosition = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.High,
-          timeInterval: 5000, // 5 secondes
-          distanceInterval: 10 // 10 mètres
-        },
-        async (newLocation) => {
-          const position = {
-            latitude: newLocation.coords.latitude,
-            longitude: newLocation.coords.longitude
-          };
-          
-          // Mettre à jour l'état local
-          setUserLocation(position);
-          
-          // Mise à jour de la localisation du client en base de données avec le nouveau service
-          try {
-            await updateUserLocation(user.id, position);
-            console.log('Position client mise à jour en base de données (watchPosition)');
-          } catch (error) {
-            console.error('Error updating client location in database:', error);
-          }
-        }
-      );
-      
-      // Stocker la référence pour pouvoir nettoyer
-      setWatchId(watchPosition);
-    } catch (error) {
-      console.error('Error setting up position watching:', error);
     }
     
     // 4. S'abonner aux mises à jour de position du prestataire en temps réel 
     if (job && job.prestataire_id) {
       console.log(`Configuration du suivi en temps réel pour le prestataire ${job.prestataire_id}`);
       
-      // Configuration initiale avec une position par défaut
-      let initialPrestataireLocation = {
-        latitude: 48.8566, // Paris
-        longitude: 2.3522
-      };
-      
-      // Récupérer la position actuelle du prestataire depuis la base de données
-      try {
-        const prestataireLocation = await getUserLocation(job.prestataire_id);
-        
-        if (prestataireLocation) {
-          console.log('Position initiale du prestataire récupérée:', prestataireLocation);
-          initialPrestataireLocation = {
-            latitude: prestataireLocation.latitude,
-            longitude: prestataireLocation.longitude
-          };
-          
-          // Mettre à jour l'état avec la position initiale du prestataire
-          setPrestataire(prev => ({
-            ...prev!,
-            location: initialPrestataireLocation
-          }));
-          
-          // Calculer l'ETA initial
-          if (userLocation) {
-            const distanceValue = calcDistance(userLocation, initialPrestataireLocation);
-            const etaMinutes = calculateETA(distanceValue);
-            
-            // Formater l'affichage de l'ETA
-            if (etaMinutes <= 1) {
-              setEta('Moins d\'1 min');
-            } else if (etaMinutes < 60) {
-              setEta(`${etaMinutes} min`);
-            } else {
-              const hours = Math.floor(etaMinutes / 60);
-              const mins = etaMinutes % 60;
-              setEta(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
-            }
-          }
-        } else {
-          console.log('Aucune position du prestataire trouvée, utilisation de la position par défaut');
-          
-          // Mettre à jour l'état avec la position par défaut
-          setPrestataire(prev => ({
-            ...prev!,
-            location: initialPrestataireLocation
-          }));
-        }
-      } catch (error) {
-        console.error('Error fetching prestataire location:', error);
-        
-        // Mettre à jour l'état avec la position par défaut en cas d'erreur
-        setPrestataire(prev => ({
-          ...prev!,
-          location: initialPrestataireLocation
-        }));
-      }
-      
-      // S'abonner aux mises à jour de position du prestataire
+      // Abonner aux mises à jour de position du prestataire
       const unsubscribe = subscribeToUserLocation(job.prestataire_id, (updatedLocation: UserLocation) => {
         console.log('Mise à jour de position du prestataire reçue:', updatedLocation);
         
-        // Mettre à jour l'état avec la nouvelle position
-        const newLocation = {
-          latitude: updatedLocation.latitude,
-          longitude: updatedLocation.longitude
-        };
+        if (!updatedLocation) return;
         
-        setPrestataire(prev => ({
-          ...prev!,
-          location: newLocation
-        }));
+        // Vérifier et extraire les coordonnées
+        if (typeof updatedLocation.latitude === 'number' && typeof updatedLocation.longitude === 'number') {
+          console.log(`Coordonnées valides détectées: lat=${updatedLocation.latitude}, long=${updatedLocation.longitude}`);
+          
+          // Mettre à jour l'état avec la nouvelle position
+          setPrestataire(prev => {
+            if (!prev) return prev;
+            
+            // Adresse par défaut si null
+            const prestataireAddress = updatedLocation.address || "5 rue des Sablons, 75016 Paris";
+            
+            return {
+              ...prev,
+              location: {
+                latitude: updatedLocation.latitude,
+                longitude: updatedLocation.longitude,
+                address: prestataireAddress
+              }
+            };
+          });
+        } else {
+          console.error('Coordonnées invalides reçues:', updatedLocation);
+        }
         
-        // Mettre à jour le temps d'arrivée estimé
-        if (userLocation) {
-          const distanceValue = calcDistance(userLocation, newLocation);
+        // Mettre à jour le temps d'arrivée estimé si le prestataire est en route
+        if (userLocation && job.tracking_status === 'en_route') {
+          const distanceValue = calcDistance(
+            userLocation, 
+            { latitude: updatedLocation.latitude, longitude: updatedLocation.longitude }
+          );
           const etaMinutes = calculateETA(distanceValue);
           
           // Formater l'affichage de l'ETA
@@ -467,11 +625,6 @@ const TrackingScreen = ({ route, navigation }: any) => {
         // Se désabonner des mises à jour Realtime
         if (unsubscribe) {
           unsubscribe();
-        }
-        
-        // Nettoyer la surveillance de position
-        if (watchId && typeof watchId === 'object' && 'remove' in watchId) {
-          watchId.remove();
         }
       };
     }
@@ -553,208 +706,268 @@ const TrackingScreen = ({ route, navigation }: any) => {
 
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
-      <ScrollView showsVerticalScrollIndicator={false}>
-        {/* En-tête avec statut - commenté pour éviter la duplication */}
-        {/*
-        <View style={styles.header}>
-          <View style={styles.headerTitleRow}>
-            <Text variant="h4" weight="semibold">Suivi en temps réel</Text>
-            <StatusBadge status={job.tracking_status} />
-          </View>
-          <Text variant="body2" color="text-secondary">
-            Mission #{job.id.substring(0, 8)}
-          </Text>
-        </View>
-        */}
-        
-        {/* Affichage du statut sous forme de badge en haut de l'écran */}
-        <View style={styles.statusContainer}>
-          <StatusBadge status={job.tracking_status} />
-          <Text variant="body2" color="text-secondary" style={styles.marginLeft}>
-            Mission #{job.id.substring(0, 8)}
-          </Text>
-        </View>
-        
-        {/* Carte du prestataire */}
-        {prestataire && (
-          <Card style={styles.card} elevation="sm">
-            <View style={styles.prestataireRow}>
-              <Avatar 
-                size="lg" 
-                initials={prestataire.name.substring(0, 2)} 
-                backgroundColor={COLORS.primary}
-              />
-              <View style={styles.prestataireInfo}>
-                <Text variant="h5" weight="semibold">{prestataire.name}</Text>
-                <View style={styles.ratingContainer}>
-                  <Ionicons name="star" size={16} color={COLORS.warning} />
-                  <Text variant="body2" style={styles.smallMarginLeft}>4.9</Text>
-                  <Text variant="body2" color="text-secondary" style={styles.marginLeft}>(128 avis)</Text>
-                </View>
+      {/* En-tête de la carte avec le statut et la géolocalisation */}
+      <View style={styles.heroMapContainer}>
+        <MapView
+          ref={mapRef}
+          provider={PROVIDER_GOOGLE}
+          style={styles.heroMap}
+        >
+          {/* Marqueur pour le client - avec vérification des valeurs */}
+          {userLocation && typeof userLocation.latitude === 'number' && typeof userLocation.longitude === 'number' && (
+            <Marker
+              coordinate={{
+                latitude: userLocation.latitude,
+                longitude: userLocation.longitude
+              }}
+              title="Votre position"
+            >
+              <View style={styles.clientMarker}>
+                <Ionicons name="home" size={18} color="#FFFFFF" />
               </View>
-              <TouchableOpacity 
-                style={styles.iconButton} 
-                onPress={() => navigation.navigate('Chat', { jobId: job.id })}
-              >
-                <Ionicons name="chatbubble-outline" size={22} color={COLORS.primary} />
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.iconButton, styles.marginLeft]} 
-                onPress={() => Alert.alert('Appel', 'Fonctionnalité d\'appel disponible prochainement')}
-              >
-                <Ionicons name="call-outline" size={22} color={COLORS.primary} />
-              </TouchableOpacity>
-            </View>
-          </Card>
-        )}
+            </Marker>
+          )}
+
+          {/* Marqueur pour le prestataire - avec vérification des valeurs */}
+          {prestataire && prestataire.location && 
+           typeof prestataire.location.latitude === 'number' && 
+           typeof prestataire.location.longitude === 'number' && (
+            <Marker
+              coordinate={{
+                latitude: prestataire.location.latitude,
+                longitude: prestataire.location.longitude
+              }}
+              title="Prestataire"
+            >
+              <View style={styles.prestataireMarker}>
+                <Ionicons name="car" size={18} color="#FFFFFF" />
+              </View>
+            </Marker>
+          )}
+          
+          {/* Ligne qui relie les deux points - vérification des valeurs */}
+          {userLocation && prestataire && prestataire.location && 
+           typeof userLocation.latitude === 'number' && 
+           typeof userLocation.longitude === 'number' &&
+           typeof prestataire.location.latitude === 'number' && 
+           typeof prestataire.location.longitude === 'number' && (
+            <Polyline
+              coordinates={[
+                { 
+                  latitude: userLocation.latitude,
+                  longitude: userLocation.longitude
+                },
+                { 
+                  latitude: prestataire.location.latitude,
+                  longitude: prestataire.location.longitude
+                }
+              ]}
+              strokeColor="#3478F6"
+              strokeWidth={3}
+              lineDashPattern={[1, 3]}
+            />
+          )}
+        </MapView>
         
-        {/* Carte de statut et ETA */}
-        <Card style={styles.card} elevation="sm">
-          <View style={styles.statusRow}>
-            <View style={styles.statusIconContainer}>
-              {getStatusIcon(job.tracking_status)}
-            </View>
-            <View style={styles.statusInfo}>
-              <Text variant="body1" weight="medium">
-                {job.tracking_status === TrackingStatus.NOT_STARTED && 'En attente de démarrage'}
-                {job.tracking_status === TrackingStatus.EN_ROUTE && 'En route vers votre position'}
-                {job.tracking_status === TrackingStatus.ARRIVED && 'Arrivé à destination'}
-                {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Prestation en cours'}
-                {job.tracking_status === TrackingStatus.COMPLETED && 'Prestation terminée'}
-              </Text>
-              <Text variant="body2" color="text-secondary">
-                {job.tracking_status === TrackingStatus.EN_ROUTE && `Arrivée estimée dans ${eta}`}
-                {job.tracking_status === TrackingStatus.ARRIVED && 'Le prestataire est arrivé'}
-                {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Travail en cours'}
-                {job.tracking_status === TrackingStatus.COMPLETED && 'Mission terminée avec succès'}
-              </Text>
-            </View>
-          </View>
-        </Card>
-        
-        {/* Carte de localisation avec MapView */}
-        <Card style={styles.card} elevation="sm">
-          <View style={styles.sectionHeader}>
-            <Text variant="h5" weight="semibold" style={styles.smallMarginBottom}>
-              <Ionicons name="location" size={18} color={COLORS.primary} /> Suivi de localisation
+        {/* Badge de statut en haut à gauche */}
+        <View style={styles.statusOverlay}>
+          <View style={styles.statusPill}>
+            <View style={styles.statusDot} />
+            <Text variant="caption" weight="semibold" style={styles.statusText}>
+              {job.tracking_status === TrackingStatus.NOT_STARTED && 'En attente'}
+              {job.tracking_status === TrackingStatus.EN_ROUTE && 'Prestataire en route'}
+              {job.tracking_status === TrackingStatus.ARRIVED && 'Prestataire arrivé'}
+              {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Mission en cours'}
+              {job.tracking_status === TrackingStatus.COMPLETED && 'Mission terminée'}
             </Text>
           </View>
+        </View>
+        
+        {/* Badge d'ETA flottant en bas à droite */}
+        {job.tracking_status === TrackingStatus.EN_ROUTE && (
+          <View style={styles.etaOverlay}>
+            <View style={styles.etaBadgeEnhanced}>
+              <Ionicons name="time" size={16} color="#FFFFFF" />
+              <Text variant="body2" weight="semibold" color="light" style={styles.etaText}>
+                Arrivée dans {eta || '15 min'}
+              </Text>
+            </View>
+          </View>
+        )}
+        
+        {/* Badge de distance flottant en bas à gauche */}
+        <View style={styles.distanceOverlay}>
+          <View style={styles.distanceBadge}>
+            <Ionicons name="compass" size={16} color="#FFFFFF" />
+            <Text variant="body2" weight="semibold" color="light" style={styles.etaText}>
+              0.5 km
+            </Text>
+          </View>
+        </View>
+        
+        {/* Bouton pour recentrer la carte */}
+        <TouchableOpacity 
+          style={styles.recenterButton}
+          onPress={() => {
+            Alert.alert("Carte", "La fonction de recentrage est temporairement désactivée.");
+          }}
+        >
+          <Ionicons name="locate" size={22} color="#3478F6" />
+        </TouchableOpacity>
+      </View>
+      
+      <ScrollView showsVerticalScrollIndicator={false} style={styles.contentScroll}>
+        {/* Carte d'information du prestataire */}
+        <Card style={styles.providerCard} elevation="md">
+          <View style={styles.providerHeader}>
+            <Text variant="h6" weight="semibold" style={styles.sectionTitle}>
+              Détails du prestataire
+            </Text>
+            <Badge 
+              variant="info" 
+              label={`#${job.id.substring(0, 6)}`} 
+              size="sm"
+              border
+            />
+          </View>
           
-          {userLocation && prestataire?.location ? (
-            <View>
-              {/* Carte interactive */}
-              <View style={styles.mapContainer}>
-                <MapView
-                  ref={mapRef}
-                  style={styles.map}
-                  initialRegion={{
-                    latitude: prestataire.location.latitude,
-                    longitude: prestataire.location.longitude,
-                    latitudeDelta: 0.02,
-                    longitudeDelta: 0.02,
-                  }}
-                >
-                  {/* Marqueur pour le client */}
-                  <Marker
-                    coordinate={{
-                      latitude: userLocation.latitude,
-                      longitude: userLocation.longitude
-                    }}
-                    title="Votre position"
-                    pinColor={COLORS.primary}
-                  />
-
-                  {/* Marqueur pour le prestataire */}
-                  <Marker
-                    coordinate={{
-                      latitude: prestataire.location.latitude,
-                      longitude: prestataire.location.longitude
-                    }}
-                    title="Prestataire"
-                    pinColor="red"
-                  />
-                  
-                  {/* Ligne qui relie les deux points */}
-                  <Polyline
-                    coordinates={[
-                      { latitude: userLocation.latitude, longitude: userLocation.longitude },
-                      { latitude: prestataire.location.latitude, longitude: prestataire.location.longitude }
-                    ]}
-                    strokeColor="#007AFF"
-                    strokeWidth={3}
-                  />
-                </MapView>
-              </View>
-
-              <View style={styles.mapActions}>
-                {/* Bouton pour localiser le prestataire */}
-                <TouchableOpacity 
-                  style={styles.mapButton}
-                  onPress={() => {
-                    if (prestataire?.location && mapRef.current) {
-                      try {
-                        mapRef.current.animateToRegion({
-                          latitude: prestataire.location.latitude,
-                          longitude: prestataire.location.longitude,
-                          latitudeDelta: 0.02,
-                          longitudeDelta: 0.02,
-                        }, 1000);
-                      } catch (e) {
-                        console.log('Erreur d\'animation:', e);
-                      }
-                    }
-                  }}
-                >
-                  <Ionicons name="locate" size={18} color={COLORS.primary} />
-                  <Text variant="caption" color="primary" style={styles.smallMarginLeft}>
-                    Suivre le prestataire
-                  </Text>
-                </TouchableOpacity>
-              </View>
+          <View style={styles.prestataireRow}>
+            {prestataire.avatar ? (
+              <Image 
+                source={{ uri: prestataire.avatar }} 
+                style={styles.enhancedAvatar}
+              />
+            ) : (
+              <Avatar 
+                size="xl"
+                initials={prestataire.name ? prestataire.name.substring(0, 1).toUpperCase() : "P"}
+                backgroundColor="#3478F6"
+              />
+            )}
+            
+            <View style={styles.enhancedProviderInfo}>
+              <Text variant="h5" weight="semibold" style={styles.enhancedProviderName}>
+                {prestataire.name || 'Jean Dupont'}
+              </Text>
               
-              <View style={styles.distanceContainer}>
-                <Ionicons name="resize" size={18} color={COLORS.primary} />
-                <Text variant="body1" weight="medium" color="primary" style={styles.marginLeft}>
-                  Distance: {calculateDistance(userLocation, prestataire.location)} km
+              <View style={styles.ratingContainer}>
+                <Ionicons name="star" size={16} color="#FFB800" />
+                <Text variant="body2" style={styles.smallMarginLeft}>
+                  {prestataire.reviewStats?.average_rating ? prestataire.reviewStats.average_rating.toFixed(1) : '4.8'}
+                </Text>
+                <Text variant="body2" color="text-secondary" style={styles.smallMarginLeft}>
+                  ({prestataire.reviewStats?.review_count || 12} avis)
                 </Text>
               </View>
               
-              <View style={styles.legendContainer}>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.primary }]} />
-                  <Text variant="body2">Vous</Text>
+              <View style={styles.providerStatusContainer}>
+                <View style={styles.statusIndicator}>
+                  {getStatusIcon(job.tracking_status)}
                 </View>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: "red" }]} />
-                  <Text variant="body2">Prestataire</Text>
-                </View>
+                <Text variant="body2" color="text-secondary" style={styles.smallMarginLeft}>
+                  {job.tracking_status === TrackingStatus.NOT_STARTED && 'En attente de démarrage'}
+                  {job.tracking_status === TrackingStatus.EN_ROUTE && `En route - Arrivée dans ${eta || '15 min'}`}
+                  {job.tracking_status === TrackingStatus.ARRIVED && 'Arrivé à destination'}
+                  {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Prestation en cours'}
+                  {job.tracking_status === TrackingStatus.COMPLETED && 'Prestation terminée'}
+                </Text>
+              </View>
+            </View>
+          </View>
+          
+          <View style={styles.providerActions}>
+            <TouchableOpacity 
+              style={styles.actionButton}
+              onPress={() => navigation.navigate('Chat', { jobId: job.id })}
+            >
+              <View style={styles.actionIconBg}>
+                <Ionicons name="chatbubble" size={18} color="#FFFFFF" />
+              </View>
+              <Text variant="body2" weight="medium" style={styles.actionText}>
+                Contacter
+              </Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={styles.actionButton}
+              onPress={() => Alert.alert('Appel', 'Fonctionnalité d\'appel disponible prochainement')}
+            >
+              <View style={[styles.actionIconBg, styles.callIcon]}>
+                <Ionicons name="call" size={18} color="#FFFFFF" />
+              </View>
+              <Text variant="body2" weight="medium" style={styles.actionText}>
+                Appeler
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </Card>
+        
+        {/* Carte de détails du trajet */}
+        <Card style={styles.journeyCard} elevation="md">
+          <View style={styles.journeyHeader}>
+            <Ionicons name="navigate-circle" size={22} color="#3478F6" />
+            <Text variant="h6" weight="semibold" style={styles.journeyTitle}>
+              Détails du trajet
+            </Text>
+          </View>
+          
+          <View style={styles.journeyDetails}>
+            <View style={styles.journeyItem}>
+              <View style={styles.journeyIconContainer}>
+                <Ionicons name="location" size={18} color="#3478F6" />
+              </View>
+              <View style={styles.journeyItemContent}>
+                <Text variant="body2" color="text-secondary">Adresse de départ</Text>
+                <Text variant="body2" weight="medium">
+                  {prestataire.location.address || "5 rue des Sablons, 75016 Paris"}
+                </Text>
+              </View>
+            </View>
+            
+            <View style={styles.journeySeparator}>
+              <View style={styles.journeyDashedLine} />
+              <Ionicons name="arrow-down" size={16} color="#3478F6" />
+              <View style={styles.journeyDashedLine} />
+            </View>
+            
+            <View style={styles.journeyItem}>
+              <View style={styles.journeyIconContainer}>
+                <Ionicons name="home" size={18} color="#3478F6" />
+              </View>
+              <View style={styles.journeyItemContent}>
+                <Text variant="body2" color="text-secondary">Adresse d'arrivée</Text>
+                <Text variant="body2" weight="medium">
+                  {userLocation.address || "74 bis rue Lauriston, 75016 Paris"}
+                </Text>
+              </View>
+            </View>
+            
+            <View style={styles.journeyStats}>
+              <View style={styles.journeyStat}>
+                <Ionicons name="time" size={16} color="#3478F6" />
+                <Text variant="body2" weight="medium" style={styles.journeyStatText}>
+                  {eta || "15 min"}
+                </Text>
               </View>
               
-              {/* Information d'estimation d'arrivée au lieu des coordonnées */}
-              {job.tracking_status === TrackingStatus.EN_ROUTE && (
-                <View style={styles.etaContainer}>
-                  <Ionicons name="time-outline" size={20} color={COLORS.info} style={styles.marginRight} />
-                  <Text variant="body1" weight="medium">
-                    Temps d'arrivée estimé: <Text color="primary">{eta || '15-20 min'}</Text>
-                  </Text>
-                </View>
-              )}
+              <View style={styles.journeyStatSeparator} />
+              
+              <View style={styles.journeyStat}>
+                <Ionicons name="resize" size={16} color="#3478F6" />
+                <Text variant="body2" weight="medium" style={styles.journeyStatText}>
+                  0.5 km
+                </Text>
+              </View>
             </View>
-          ) : (
-            <View style={styles.emptyStateContainer}>
-              <Ionicons name="location-outline" size={36} color={COLORS.textSecondary} />
-              <Text variant="body1" color="text-secondary" style={styles.marginTop}>
-                En attente de la position...
-              </Text>
-            </View>
-          )}
+          </View>
         </Card>
         
         {/* Instructions et informations supplémentaires */}
-        <Card style={[styles.card, styles.marginBottom]} elevation="sm">
-          <View style={styles.sectionHeader}>
-            <Text variant="h5" weight="semibold" style={styles.smallMarginBottom}>
-              <Ionicons name="information-circle" size={18} color={COLORS.primary} /> Informations
+        <Card style={[styles.card, styles.infoCard]} elevation="md">
+          <View style={styles.infoHeader}>
+            <Ionicons name="information-circle" size={22} color="#3478F6" />
+            <Text variant="h6" weight="semibold" style={styles.infoTitle}>
+              Informations
             </Text>
           </View>
           
@@ -764,40 +977,42 @@ const TrackingScreen = ({ route, navigation }: any) => {
               Veuillez rester disponible pour l'accueillir.
             </Text>
             
-            <View style={styles.infoItem}>
-              <Ionicons name="checkmark-circle" size={20} color={COLORS.success} style={styles.marginRight} />
+            <View style={styles.enhancedInfoItem}>
+              <View style={styles.infoIconContainer}>
+                <Ionicons name="checkmark-circle" size={18} color="#FFFFFF" />
+              </View>
               <Text variant="body2">Prestataire vérifié et certifié</Text>
             </View>
-            <View style={styles.infoItem}>
-              <Ionicons name="shield-checkmark" size={20} color={COLORS.primary} style={styles.marginRight} />
+            
+            <View style={styles.enhancedInfoItem}>
+              <View style={styles.infoIconContainer}>
+                <Ionicons name="shield-checkmark" size={18} color="#FFFFFF" />
+              </View>
               <Text variant="body2">Assurance et garantie incluses</Text>
-            </View>
-            <View style={styles.infoItem}>
-              <Ionicons name="card" size={20} color={COLORS.secondary} style={styles.marginRight} />
-              <Text variant="body2">Paiement sécurisé à la fin de la prestation</Text>
             </View>
           </View>
         </Card>
       </ScrollView>
       
       {/* Boutons d'action */}
-      <View style={styles.actionBar}>
+      <View style={styles.enhancedActionBar}>
         {job.tracking_status === TrackingStatus.ARRIVED && (
           <Button
             variant="success"
             label="Confirmer la fin de la mission"
             loading={submitting}
-            style={styles.marginBottom}
             onPress={() => handleStatusUpdate(TrackingStatus.COMPLETED)}
           />
         )}
         
-        <Button
-          variant="outline"
-          label="Urgence / Problème"
-          icon={<Ionicons name="alert-circle-outline" size={20} color={COLORS.primary} />}
-          onPress={() => Alert.alert('Assistance', 'Fonctionnalité d\'assistance disponible prochainement')}
-        />
+        {job.tracking_status !== TrackingStatus.ARRIVED && (
+          <Button
+            variant="outline"
+            label="Besoin d'aide"
+            leftIcon={<Ionicons name="help-circle" size={20} color="#3478F6" />}
+            onPress={() => Alert.alert('Assistance', 'Fonctionnalité d\'assistance disponible prochainement')}
+          />
+        )}
       </View>
     </View>
   );
@@ -808,10 +1023,331 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background
   },
-  statusContainer: {
+  // Styles pour la carte en héros (plein écran)
+  heroMapContainer: {
+    width: '100%',
+    height: 300,
+    position: 'relative',
+    ...SHADOWS.medium
+  },
+  heroMap: {
+    width: '100%',
+    height: '100%',
+  },
+  statusOverlay: {
+    position: 'absolute',
+    top: SPACING.md,
+    left: SPACING.md,
+    zIndex: 10,
+  },
+  statusPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    ...SHADOWS.small,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#3478F6',
+    marginRight: 6,
+  },
+  statusText: {
+    color: '#3478F6',
+  },
+  etaOverlay: {
+    position: 'absolute',
+    bottom: SPACING.lg,
+    right: SPACING.md,
+    zIndex: 10,
+  },
+  etaBadgeEnhanced: {
+    backgroundColor: 'rgba(52, 120, 246, 0.9)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: BORDER_RADIUS.round,
+    ...SHADOWS.medium,
+  },
+  etaText: {
+    marginLeft: 4,
+  },
+  distanceOverlay: {
+    position: 'absolute',
+    bottom: SPACING.lg,
+    left: SPACING.md,
+    zIndex: 10,
+  },
+  distanceBadge: {
+    backgroundColor: 'rgba(52, 120, 246, 0.9)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: BORDER_RADIUS.round,
+    ...SHADOWS.medium,
+  },
+  recenterButton: {
+    position: 'absolute',
+    top: SPACING.md,
+    right: SPACING.md,
+    zIndex: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...SHADOWS.small,
+  },
+  contentScroll: {
+    flex: 1,
+    marginTop: -20,
+  },
+  // Carte du prestataire améliorée
+  providerCard: {
+    margin: SPACING.md,
+    marginTop: 30,
+    borderRadius: BORDER_RADIUS.lg,
+    ...SHADOWS.medium,
+  },
+  providerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.sm,
+  },
+  sectionTitle: {
+    color: '#3478F6',
+  },
+  enhancedAvatar: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: "#3478F6",
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    ...SHADOWS.small,
+  },
+  enhancedProviderInfo: {
+    marginLeft: SPACING.md,
+    flex: 1,
+  },
+  enhancedProviderName: {
+    color: '#3478F6',
+    marginBottom: 4,
+  },
+  providerStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: SPACING.xs,
+  },
+  statusIndicator: {
+    width: 24,
+    height: 24,
+  },
+  providerActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: SPACING.md,
+    paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: '#EEEEEE',
+  },
+  actionButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: SPACING.sm,
+    flex: 1,
+  },
+  actionIconBg: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#3478F6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 4,
+    ...SHADOWS.small,
+  },
+  callIcon: {
+    backgroundColor: '#4CAF50',
+  },
+  actionText: {
+    color: '#444444',
+    marginTop: 4,
+  },
+  // Carte de détails du trajet
+  journeyCard: {
+    margin: SPACING.md,
+    marginTop: SPACING.sm,
+    borderRadius: BORDER_RADIUS.lg,
+    ...SHADOWS.medium,
+  },
+  journeyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: SPACING.md,
+  },
+  journeyTitle: {
+    marginLeft: SPACING.sm,
+    color: '#3478F6',
+  },
+  journeyDetails: {
+    paddingHorizontal: SPACING.xs,
+  },
+  journeyItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: SPACING.sm,
+  },
+  journeyIconContainer: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#F0F9FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: SPACING.sm,
+  },
+  journeyItemContent: {
+    flex: 1,
+  },
+  journeySeparator: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    paddingLeft: 17,
+    marginVertical: 4,
+  },
+  journeyDashedLine: {
+    width: 1,
+    height: 12,
+    backgroundColor: '#CCCCCC',
+  },
+  journeyStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F0F9FF',
+    padding: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xs,
+  },
+  journeyStat: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+  },
+  journeyStatText: {
+    marginLeft: 8,
+    color: '#3478F6',
+  },
+  journeyStatSeparator: {
+    width: 1,
+    height: 20,
+    backgroundColor: '#DDDDDD',
+  },
+  // Carte d'informations
+  infoCard: {
+    margin: SPACING.md,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.lg,
+    borderRadius: BORDER_RADIUS.lg,
+    ...SHADOWS.medium,
+  },
+  infoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: SPACING.md,
+  },
+  infoTitle: {
+    marginLeft: SPACING.sm,
+    color: '#3478F6',
+  },
+  enhancedInfoItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: SPACING.sm,
+  },
+  infoIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#3478F6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: SPACING.sm,
+  },
+  // Barre d'actions améliorée
+  enhancedActionBar: {
+    backgroundColor: COLORS.white,
+    padding: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: '#EEEEEE',
+    ...SHADOWS.top,
+  },
+  // Marqueurs personnalisés
+  clientMarker: {
+    backgroundColor: '#22C55E',
+    borderRadius: BORDER_RADIUS.round,
+    width: 32,
+    height: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    ...SHADOWS.small,
+  },
+  prestataireMarker: {
+    backgroundColor: '#3478F6',
+    borderRadius: BORDER_RADIUS.round,
+    width: 32,
+    height: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    ...SHADOWS.small,
+  },
+  // Styles d'espacement
+  marginBottom: {
+    marginBottom: SPACING.sm
+  },
+  smallMarginBottom: {
+    marginBottom: 4
+  },
+  marginTop: {
+    marginTop: SPACING.sm
+  },
+  marginLeft: {
+    marginLeft: SPACING.sm
+  },
+  smallMarginLeft: {
+    marginLeft: 4
+  },
+  marginRight: {
+    marginRight: SPACING.sm
+  },
+  
+  // Anciens styles conservés pour compatibilité
+  headerContainer: {
+    paddingVertical: SPACING.lg,
+    paddingHorizontal: SPACING.md,
+    backgroundColor: COLORS.white,
+    ...SHADOWS.small,
+  },
+  statusContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
     backgroundColor: COLORS.white,
@@ -857,17 +1393,6 @@ const styles = StyleSheet.create({
     marginTop: SPACING.md,
     width: 120
   },
-  header: {
-    padding: SPACING.md,
-    backgroundColor: COLORS.white,
-    paddingVertical: SPACING.md
-  },
-  headerTitleRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: SPACING.sm
-  },
   card: {
     marginHorizontal: SPACING.md,
     marginTop: SPACING.md
@@ -875,6 +1400,15 @@ const styles = StyleSheet.create({
   prestataireRow: {
     flexDirection: 'row',
     alignItems: 'center'
+  },
+  customAvatar: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "#9C27B0",
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden'
   },
   prestataireInfo: {
     marginLeft: SPACING.md,
@@ -911,15 +1445,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border
   },
-  locationContent: {
-    marginTop: SPACING.sm
-  },
-  coordinatesContainer: {
-    backgroundColor: COLORS.backgroundDark,
-    padding: SPACING.md,
-    borderRadius: BORDER_RADIUS.md
-  },
-  // Nouveaux styles pour la carte
   mapContainer: {
     height: 250,
     marginVertical: SPACING.md,
@@ -929,27 +1454,6 @@ const styles = StyleSheet.create({
   map: {
     width: '100%',
     height: '100%'
-  },
-  markerContainer: {
-    alignItems: 'center'
-  },
-  marker: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 5
-  },
-  coordinatesInfo: {
-    padding: SPACING.sm,
-    marginTop: SPACING.sm,
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: BORDER_RADIUS.md
   },
   distanceContainer: {
     flexDirection: 'row',
@@ -980,10 +1484,6 @@ const styles = StyleSheet.create({
     borderRadius: BORDER_RADIUS.round,
     marginRight: SPACING.sm
   },
-  emptyStateContainer: {
-    paddingVertical: SPACING.xl,
-    alignItems: 'center'
-  },
   infoContent: {
     marginTop: SPACING.sm
   },
@@ -1002,27 +1502,6 @@ const styles = StyleSheet.create({
     paddingBottom: SPACING.sm,
     borderTopWidth: 1,
     borderTopColor: COLORS.border
-  },
-  marginBottom: {
-    marginBottom: SPACING.sm
-  },
-  smallMarginBottom: {
-    marginBottom: 4
-  },
-  marginTop: {
-    marginTop: SPACING.sm
-  },
-  marginLeft: {
-    marginLeft: SPACING.sm
-  },
-  smallMarginLeft: {
-    marginLeft: 4
-  },
-  marginRight: {
-    marginRight: SPACING.sm
-  },
-  smallMarginRight: {
-    marginRight: 4
   }
 });
 

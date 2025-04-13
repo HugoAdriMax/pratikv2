@@ -5,7 +5,6 @@ import {
   TouchableOpacity,
   FlatList,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
   SafeAreaView,
@@ -13,17 +12,18 @@ import {
   Animated,
   Keyboard,
   Dimensions,
+  Image,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { analyzeChatMessage, generateChatbotResponse } from '../../services/chatbot';
 import { createRequest, getServiceIdByName } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ChatMessage from '../../components/ChatMessage';
-import Button from '../../components/ui/Button';
-import Card from '../../components/ui/Card';
-import Text from '../../components/ui/Text';
-import { COLORS, FONTS, BORDER_RADIUS, SHADOWS, SPACING } from '../../utils/theme';
+import { Text, Button, Card } from '../../components/ui';
+import { COLORS, BORDER_RADIUS, SHADOWS, SPACING } from '../../utils/theme';
 import { Ionicons } from '@expo/vector-icons';
+import { geocodeAddress } from '../../services/location';
 
 interface Message {
   id: string;
@@ -54,44 +54,67 @@ const ChatbotScreen = ({ navigation }: any) => {
   });
   const [formComplete, setFormComplete] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   
   const flatListRef = useRef<FlatList>(null);
   const messageHistoryRef = useRef<string[]>([]);
 
-  // Keyboard listeners
+  // Initial chatbot message - réinitialisé à chaque fois que l'écran reçoit le focus
   useEffect(() => {
-    const keyboardDidShowListener = Keyboard.addListener(
-      'keyboardDidShow',
-      (e) => {
-        setKeyboardHeight(e.endCoordinates.height);
-      }
-    );
-    const keyboardDidHideListener = Keyboard.addListener(
-      'keyboardDidHide',
-      () => {
-        setKeyboardHeight(0);
-      }
-    );
-
-    return () => {
-      keyboardDidShowListener.remove();
-      keyboardDidHideListener.remove();
-    };
-  }, []);
-
-  // Initial chatbot message
-  useEffect(() => {
-    const initialMessage = {
-      id: Date.now().toString(),
-      text: "Bonjour ! Je suis votre assistant personnel. Comment puis-je vous aider aujourd'hui ?",
-      isUser: false,
-      animValue: new Animated.Value(0)
+    const resetChatbot = () => {
+      console.log("Réinitialisation du chatbot...");
+      
+      const initialMessage = {
+        id: Date.now().toString(),
+        text: "Salut ! Je suis Pat, ton assistant Pratik. 😊 Dis-moi comment je peux t'aider aujourd'hui ? Tu as besoin d'un plombier, électricien ou autre service ?",
+        isUser: false,
+        animValue: new Animated.Value(0)
+      };
+      
+      // Réinitialiser tous les états
+      setMessages([initialMessage]);
+      messageHistoryRef.current = ["Assistant: Salut ! Je suis Pat, ton assistant Pratik. 😊 Dis-moi comment je peux t'aider aujourd'hui ? Tu as besoin d'un plombier, électricien ou autre service ?"];
+      setFormData({ location: {} });
+      setFormComplete(false);
+      setInputText('');
+      setLoading(false);
     };
     
-    setMessages([initialMessage]);
-    messageHistoryRef.current = ["Assistant: Bonjour ! Je suis votre assistant personnel. Comment puis-je vous aider aujourd'hui ?"];
+    // Initialisation au premier chargement
+    resetChatbot();
+    
+    // Ajouter un écouteur d'événement pour réinitialiser le chatbot quand on revient à cet écran
+    const unsubscribe = navigation.addListener('focus', resetChatbot);
+    
+    return () => {
+      unsubscribe();
+    };
+  }, [navigation]);
+
+  // Keyboard listeners
+  useEffect(() => {
+    const keyboardWillShowListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      (e) => {
+        setKeyboardHeight(e.endCoordinates.height);
+        setKeyboardVisible(true);
+      }
+    );
+    
+    const keyboardWillHideListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => {
+        setKeyboardHeight(0);
+        setKeyboardVisible(false);
+      }
+    );
+    
+    return () => {
+      keyboardWillShowListener.remove();
+      keyboardWillHideListener.remove();
+    };
   }, []);
 
   // Check if form is complete
@@ -126,8 +149,37 @@ const ChatbotScreen = ({ navigation }: any) => {
       // Analyze message
       const analysis = await analyzeChatMessage(inputText, messageHistoryRef.current);
       
-      // Update form data based on analysis
-      updateFormData(analysis);
+      // Update form data based on analysis (now async for address validation)
+      await updateFormData(analysis);
+      
+      // Pour les validations d'adresse, on utilise une approche plus directe sans dépendre de formData
+      if (analysis.type === 'location') {
+        // Vérifier si une location a été trouvée (en vérifiant directement l'analyse, pas formData)
+        const isAddressValid = analysis.data && analysis.data.coordinates && 
+          analysis.data.coordinates.latitude && analysis.data.coordinates.longitude;
+        
+        if (isAddressValid) {
+          // Enregistrer la validation dans l'historique avec les coordonnées de l'analyse
+          const validatedMsg = `L'adresse a été validée: ${analysis.data.formattedAddress || analysis.content}`;
+          console.log(validatedMsg);
+          messageHistoryRef.current.push(`Système: ${validatedMsg}`);
+          
+          // Ajouter directement un message de confirmation avec l'adresse validée
+          const confirmationMessage = {
+            id: `address-confirm-${Date.now()}`,
+            text: `J'ai bien enregistré votre adresse: ${analysis.data.formattedAddress || analysis.content}. Avez-vous des précisions sur le problème à résoudre?`,
+            isUser: false,
+            animValue: new Animated.Value(0)
+          };
+          
+          setMessages(prev => [...prev, confirmationMessage]);
+        } else if (analysis.errorMessage) {
+          // Si l'analyse contient un message d'erreur, on l'affiche et on arrête
+          console.log(`Adresse invalide: ${analysis.errorMessage}`);
+          setLoading(false);
+          return;
+        }
+      }
       
       // Generate response
       const botResponse = await generateChatbotResponse(analysis, messageHistoryRef.current);
@@ -159,7 +211,7 @@ const ChatbotScreen = ({ navigation }: any) => {
     }
   };
 
-  const updateFormData = (analysis: any) => {
+  const updateFormData = async (analysis: any) => {
     switch (analysis.type) {
       case 'service_request':
         setFormData(prev => ({
@@ -168,14 +220,64 @@ const ChatbotScreen = ({ navigation }: any) => {
         }));
         break;
       case 'location':
-        // Ideally, we would use a geocoding service to get lat/lng
-        setFormData(prev => ({
-          ...prev,
-          location: {
-            ...prev.location,
-            address: analysis.content
+        try {
+          // Validation de l'adresse avec le service de géocodage
+          setLoading(true);
+          
+          console.log(`Tentative de géocodage pour: "${analysis.content}"`);
+          const geocodedLocation = await geocodeAddress(analysis.content);
+          
+          if (!geocodedLocation) {
+            // L'adresse n'a pas pu être géocodée
+            console.log(`Adresse non trouvée: "${analysis.content}"`);
+            
+            const errorMessage = {
+              id: `location-error-${Date.now()}`,
+              text: "Je n'ai pas pu trouver cette adresse. Pouvez-vous me donner une adresse plus précise, avec le nom de la rue, le numéro et la ville?",
+              isUser: false,
+              animValue: new Animated.Value(0)
+            };
+            
+            setMessages(prev => [...prev, errorMessage]);
+            return;
           }
-        }));
+          
+          // L'adresse est valide, mettre à jour les données du formulaire avec les coordonnées précises
+          const updatedLocation = {
+            latitude: geocodedLocation.latitude,
+            longitude: geocodedLocation.longitude,
+            address: geocodedLocation.formattedAddress || analysis.content
+          };
+          
+          console.log(`Adresse validée avec succès: "${analysis.content}" => Coord: ${geocodedLocation.latitude}, ${geocodedLocation.longitude}`);
+          
+          // Important: mettre à jour l'état avec les nouvelles coordonnées
+          setFormData(prev => {
+            console.log("Mise à jour de formData.location avec les coordonnées validées");
+            return {
+              ...prev,
+              location: updatedLocation
+            };
+          });
+          
+          // Permettre au formData de se mettre à jour avant que handleSendMessage ne continue
+          await new Promise(resolve => setTimeout(resolve, 300));
+          
+          console.log("formData après mise à jour:", JSON.stringify(updatedLocation));
+        } catch (error) {
+          console.error('Erreur lors de la validation de l\'adresse:', error);
+          
+          const errorMessage = {
+            id: `location-error-exception-${Date.now()}`,
+            text: "Une erreur s'est produite lors de la validation de votre adresse. Pouvez-vous essayer avec une autre adresse?",
+            isUser: false,
+            animValue: new Animated.Value(0)
+          };
+          
+          setMessages(prev => [...prev, errorMessage]);
+        } finally {
+          setLoading(false);
+        }
         break;
       case 'urgency':
         // Convert description to number (1-5)
@@ -215,20 +317,43 @@ const ChatbotScreen = ({ navigation }: any) => {
     try {
       setLoading(true);
       
+      // Vérification finale de l'adresse
+      if (!formData.location?.latitude || !formData.location?.longitude) {
+        const errorMessage = {
+          id: Date.now().toString(),
+          text: "L'adresse fournie n'est pas valide. Veuillez indiquer une adresse précise avant de soumettre votre demande.",
+          isUser: false,
+          animValue: new Animated.Value(0)
+        };
+        
+        setMessages(prev => [...prev, errorMessage]);
+        setLoading(false);
+        return;
+      }
+      
+      console.log(`[Chatbot] Création d'une demande pour le service: "${formData.service}"`);
+      
       // Get a valid UUID for the service
       const serviceId = await getServiceIdByName(formData.service || 'Plomberie');
+      console.log(`[Chatbot] Service ID obtenu: "${serviceId}"`);
       
-      await createRequest({
+      const requestData = {
         client_id: user.id,
         service_id: serviceId,
         location: {
-          latitude: formData.location?.latitude || 0,
-          longitude: formData.location?.longitude || 0,
-          address: formData.location?.address || ''
+          latitude: formData.location.latitude,
+          longitude: formData.location.longitude,
+          address: formData.location.address || ''
         },
         urgency: formData.urgency || 3,
         notes: formData.notes
-      });
+      };
+      
+      console.log(`[Chatbot] Données de la demande:`, JSON.stringify(requestData, null, 2));
+      console.log(`[Chatbot] Adresse géocodée: ${requestData.location.address} (${requestData.location.latitude}, ${requestData.location.longitude})`);
+      
+      const createdRequest = await createRequest(requestData);
+      console.log(`[Chatbot] Demande créée avec ID: ${createdRequest.id}, service_id: "${createdRequest.service_id}"`);
       
       const successMessage = {
         id: Date.now().toString(),
@@ -247,7 +372,7 @@ const ChatbotScreen = ({ navigation }: any) => {
       
       // Navigate to requests screen after a short delay
       setTimeout(() => {
-        navigation.navigate('Requests');
+        navigation.navigate('ClientTabs', { screen: 'Requests' });
       }, 2000);
     } catch (error) {
       console.error('Error submitting request:', error);
@@ -277,36 +402,41 @@ const ChatbotScreen = ({ navigation }: any) => {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
       
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-      >
-        <View style={styles.header}>
-          <View style={styles.headerContent}>
-            <View style={styles.headerIconContainer}>
-              <Ionicons name="chatbubble-ellipses" size={24} color={COLORS.white} />
-            </View>
-            <View style={styles.headerTextContainer}>
-              <Text variant="h4" weight="semibold" color="text">
-                Assistant
-              </Text>
-              <Text variant="body2" color="text-secondary">
-                Je vous aide à formuler votre demande
-              </Text>
-            </View>
+      <View style={styles.header}>
+        <View style={styles.headerContent}>
+          <View style={styles.headerIconContainer}>
+            <Image 
+              source={{ uri: 'https://i.imgur.com/VhfSTEy.png' }} 
+              style={styles.headerIcon} 
+              resizeMode="cover"
+            />
+          </View>
+          <View style={styles.headerTextContainer}>
+            <Text variant="h4" weight="semibold" color="text">
+              Pat, votre assistant intelligent
+            </Text>
+            <Text variant="body2" color="text-secondary">
+              Trouvez le service idéal en quelques messages
+            </Text>
           </View>
         </View>
-        
+      </View>
+      
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={{flex: 1}}
+        keyboardVerticalOffset={10}
+      >
         <FlatList
           ref={flatListRef}
           data={messages}
           renderItem={renderItem}
           keyExtractor={item => item.id}
-          contentContainerStyle={[
-            styles.messagesContainer,
-            formComplete && { paddingBottom: 180 }
-          ]}
+          style={styles.chatList}
+          contentContainerStyle={{
+            padding: SPACING.md,
+            paddingBottom: formComplete ? 280 : 100,
+          }}
           onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
           onLayout={() => flatListRef.current?.scrollToEnd({ animated: true })}
           showsVerticalScrollIndicator={false}
@@ -427,9 +557,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
-  container: {
-    flex: 1,
-  },
   header: {
     padding: SPACING.md,
     backgroundColor: COLORS.white,
@@ -444,25 +571,30 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: COLORS.primary,
+    backgroundColor: COLORS.white,
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: SPACING.sm,
+    overflow: 'hidden',
+  },
+  headerIcon: {
+    width: 40,
+    height: 40,
   },
   headerTextContainer: {
     flex: 1,
   },
-  messagesContainer: {
-    padding: SPACING.md,
-    paddingBottom: SPACING.xxl,
+  chatList: {
+    flex: 1,
   },
   formSummaryContainer: {
     position: 'absolute',
-    bottom: 80,
+    bottom: 70,
     left: 0,
     right: 0,
     paddingHorizontal: SPACING.md,
     paddingBottom: SPACING.xs,
+    zIndex: 5,
   },
   formSummary: {
     backgroundColor: COLORS.white,
@@ -526,9 +658,9 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
     backgroundColor: COLORS.white,
     paddingHorizontal: SPACING.md,
-    paddingTop: 8,
-    paddingBottom: Platform.OS === 'ios' ? 20 : 8, // Plus grand sur iOS pour éviter la barre home
-    ...SHADOWS.small,
+    paddingVertical: 15,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   inputWrapper: {
     flexDirection: 'row',
@@ -538,6 +670,7 @@ const styles = StyleSheet.create({
     paddingLeft: 16,
     paddingRight: 4,
     height: 40,
+    width: '85%',
   },
   input: {
     flex: 1,

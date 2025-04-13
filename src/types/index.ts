@@ -32,13 +32,30 @@ export enum KYCStatus {
   REJECTED = 'rejected'
 }
 
+export enum PaymentStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+  REFUNDED = 'refunded'
+}
+
 export interface User {
   id: string;
   email: string;
   role: UserRole;
   phone?: string;
   is_verified: boolean;
+  is_active: boolean;
   created_at: string;
+  profile_picture?: string;
+  profile_picture_base64?: string;
+  name?: string;
+  address?: string;
+  business_reg_number?: string;
+  kyc_submitted?: boolean;
+  stripe_account_id?: string;
+  stripe_account_enabled?: boolean;
 }
 
 export interface KYC {
@@ -71,6 +88,7 @@ export interface Request {
   status: RequestStatus;
   created_at: string;
   prestataire_status?: TrackingStatus; // Statut mis à jour par le prestataire
+  is_reviewed?: boolean; // Indique si le client a déjà laissé un avis
 }
 
 export interface Offer {
@@ -80,6 +98,7 @@ export interface Offer {
   price: number;
   status: OfferStatus;
   created_at: string;
+  payment_status?: PaymentStatus;
 }
 
 export interface Job {
@@ -101,13 +120,33 @@ export interface Transaction {
   commission: number;
   payout_status: boolean;
   created_at: string;
+  payment_status: PaymentStatus;
 }
 
 export interface Review {
   id: string;
   job_id: string;
   reviewer_id: string;
+  reviewed_user_id: string; // ID de l'utilisateur évalué (prestataire ou client)
   rating: number; // 1-5
   comment?: string;
   created_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  job_id: string;
+  sender_id: string;
+  receiver_id: string;
+  content: string;
+  is_read: boolean;
+  created_at: string;
+  image_url?: string; // URL de l'image stockée dans Supabase
+}
+
+export interface LocationCoordinates {
+  latitude: number;
+  longitude: number;
+  address?: string;
+  formattedAddress?: string; // Adresse formatée retournée par reverse geocoding
 }

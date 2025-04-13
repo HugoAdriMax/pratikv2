@@ -123,7 +123,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: BORDER_RADIUS.round,
-    alignSelf: 'flex-start',
+    alignSelf: 'flex-start', // Par défaut, le badge ne prend que sa propre largeur
   },
   smallBadge: {
     paddingHorizontal: SPACING.sm,

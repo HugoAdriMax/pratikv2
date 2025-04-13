@@ -1,0 +1,31 @@
+-- Permissions for Supabase Storage bucket 'profiles'
+CREATE POLICY "Profile pictures are publicly accessible" 
+ON storage.objects 
+FOR SELECT 
+USING (
+  bucket_id = 'profiles' AND 
+  auth.role() = 'authenticated'
+);
+
+CREATE POLICY "Authenticated users can upload profile pictures" 
+ON storage.objects 
+FOR INSERT 
+WITH CHECK (
+  bucket_id = 'profiles' AND 
+  auth.uid()::text = (storage.foldername(name))[1] AND 
+  auth.role() = 'authenticated'
+);
+
+CREATE POLICY "Users can update or delete their own profile pictures" 
+ON storage.objects 
+FOR DELETE 
+USING (
+  bucket_id = 'profiles' AND 
+  auth.uid()::text = (storage.foldername(name))[1] AND 
+  auth.role() = 'authenticated'
+);
+
+-- Create the bucket if it doesn't exist
+INSERT INTO storage.buckets (id, name, public) 
+VALUES ('profiles', 'Profile Pictures', true)
+ON CONFLICT (id) DO NOTHING;

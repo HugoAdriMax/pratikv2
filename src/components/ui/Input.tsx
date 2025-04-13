@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  Platform
 } from 'react-native';
 import { COLORS, BORDER_RADIUS, SPACING } from '../../utils/theme';
 import { Ionicons } from '@expo/vector-icons';
@@ -155,10 +156,11 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    minHeight: 50,
+    minHeight: Platform.OS === 'ios' ? 20 : 50,
     fontSize: 16,
     color: COLORS.text,
     paddingHorizontal: SPACING.md,
+    paddingVertical: Platform.OS === 'ios' ? 0 : undefined, // Important pour iOS
   },
   inputWithLeftIcon: {
     paddingLeft: 6,

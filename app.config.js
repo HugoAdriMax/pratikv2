@@ -5,6 +5,10 @@ module.exports = {
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "light",
+  // Désactiver les outils de développement
+  developmentClient: {
+    silentLaunch: true,
+  },
   splash: {
     image: "./assets/roro.png",
     resizeMode: "contain",

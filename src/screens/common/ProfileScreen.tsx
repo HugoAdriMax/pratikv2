@@ -18,6 +18,7 @@ import { Text, Card, Button, Avatar, Badge } from '../../components/ui';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { uploadProfilePicture } from '../../services/api';
+import { getSelectedServices, Service } from '../../services/prestataire-services';
 
 const ProfileScreen = ({ navigation }: any) => {
   const { user, signOut, refreshProfile } = useAuth();
@@ -27,11 +28,27 @@ const ProfileScreen = ({ navigation }: any) => {
   const [locationTrackingEnabled, setLocationTrackingEnabled] = useState(true);
   const [forceUpdate, setForceUpdate] = useState(0); // Pour forcer le rafraîchissement du composant
   const [localImageBase64, setLocalImageBase64] = useState<string | null>(null); // Stockage local de l'image base64
+  const [selectedServices, setSelectedServices] = useState<Service[]>([]); // Services sélectionnés par le prestataire
   const insets = useSafeAreaInsets();
   
   // Debug - Afficher les informations utilisateur
   useEffect(() => {
     console.log('User profile:', JSON.stringify(user));
+    
+    // Récupérer les services sélectionnés si l'utilisateur est un prestataire
+    if (user && user.role === UserRole.PRESTAIRE) {
+      const loadServices = async () => {
+        try {
+          const services = await getSelectedServices(user.id);
+          setSelectedServices(services);
+          console.log('Services chargés:', services.length);
+        } catch (error) {
+          console.error('Erreur lors du chargement des services:', error);
+        }
+      };
+      
+      loadServices();
+    }
   }, [user]);
   
   // Fonction pour gérer la sélection d'image de profil
@@ -264,8 +281,49 @@ const ProfileScreen = ({ navigation }: any) => {
             </View>
             <View style={styles.profileInfo}>
               <Text variant="h4" weight="semibold">{displayName}</Text>
-              <View style={styles.marginTopXs}>
+              <View style={styles.badgeContainer}>
                 {renderUserRole()}
+                
+                {user.role === UserRole.PRESTAIRE && selectedServices.length > 0 && (
+                  // Afficher un badge par service, limité à 2 maximum
+                  <>
+                    {selectedServices.slice(0, 2).map((service, index) => (
+                      <Badge
+                        key={service.id}
+                        variant="success"
+                        label={service.name}
+                        leftIcon={<Ionicons name="checkmark-circle" size={12} color={COLORS.success} />}
+                        style={{
+                          backgroundColor: `${COLORS.success}15`,
+                          borderColor: COLORS.success,
+                          borderWidth: 1,
+                        }}
+                      />
+                    ))}
+                    {selectedServices.length > 2 && (
+                      <Badge
+                        variant="primary"
+                        label={`+${selectedServices.length - 2}`}
+                        style={{
+                          backgroundColor: COLORS.primary
+                        }}
+                      />
+                    )}
+                  </>
+                )}
+                
+                {user.role === UserRole.PRESTAIRE && selectedServices.length === 0 && (
+                  <Badge
+                    variant="warning"
+                    label="Aucun service"
+                    leftIcon={<Ionicons name="alert-circle" size={14} color={COLORS.warning} />}
+                    style={{
+                      backgroundColor: `${COLORS.warning}15`,
+                      borderColor: COLORS.warning,
+                      borderWidth: 1
+                    }}
+                  />
+                )}
               </View>
             </View>
           </View>
@@ -452,28 +510,13 @@ const ProfileScreen = ({ navigation }: any) => {
         {user.role === UserRole.PRESTAIRE && (
           <Card style={styles.sectionCard} elevation="sm">
             <View style={styles.sectionHeader}>
-              <Ionicons name="build-outline" size={22} color={COLORS.primary} />
+              <Ionicons name="card-outline" size={22} color={COLORS.primary} />
               <Text variant="h5" weight="semibold" style={styles.marginLeft}>
-                Services et paiements
+                Paiements
               </Text>
             </View>
 
             <View style={styles.separator} />
-            
-            <TouchableOpacity 
-              style={styles.documentItem} 
-              activeOpacity={0.7}
-              onPress={() => navigation.navigate('ServiceSelection')}
-            >
-              <View style={styles.documentIconContainer}>
-                <Ionicons name="build-outline" size={24} color={COLORS.primary} />
-              </View>
-              <View style={styles.documentInfo}>
-                <Text variant="body2" weight="medium">Mes services proposés</Text>
-                <Text variant="caption" color="text-secondary">Sélectionner vos spécialités</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={18} color={COLORS.textSecondary} />
-            </TouchableOpacity>
             
             <TouchableOpacity 
               style={styles.documentItem} 
@@ -698,6 +741,13 @@ const styles = StyleSheet.create({
   },
   marginTopXs: {
     marginTop: SPACING.xs,
+  },
+  badgeContainer: {
+    flexDirection: 'row',
+    marginTop: SPACING.xs,
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6, // Espacement uniforme entre les badges
   },
   marginBottom: {
     marginBottom: SPACING.md,

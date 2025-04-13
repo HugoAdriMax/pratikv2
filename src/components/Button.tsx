@@ -160,8 +160,8 @@ const styles = StyleSheet.create({
     marginVertical: SIZES.base,
   },
   text: {
-    marginLeft: 8,
     textAlign: 'center',
+    width: '100%'
   }
 });
 

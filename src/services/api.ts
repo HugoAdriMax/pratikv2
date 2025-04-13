@@ -2,12 +2,9 @@ import supabase from '../config/supabase';
 import { Request, Offer, Job, Transaction, Review, Service, UserRole, KYCStatus, TrackingStatus, RequestStatus, OfferStatus } from '../types';
 import { sendLocalNotification, sendNotificationToUser, getUserNotificationPreferences } from './notification';
 
-// Type pour les coordonnées de localisation
-export interface LocationCoordinates {
-  latitude: number;
-  longitude: number;
-  address?: string;
-}
+// Type pour les coordonnées de localisation - cette définition a été déplacée dans types/index.ts
+// Maintenue ici pour rétrocompatibilité
+import { LocationCoordinates } from '../types';
 
 // Classe d'erreur API personnalisée
 export class ApiError extends Error {
@@ -347,6 +344,16 @@ export const getRequestById = async (requestId: string): Promise<Request> => {
       .single();
       
     if (error) throw error;
+    
+    // S'assurer que la propriété location existe pour éviter les erreurs
+    if (data && !data.location) {
+      data.location = {
+        latitude: 0,
+        longitude: 0,
+        address: "Adresse non disponible"
+      };
+    }
+    
     return data as Request;
   } catch (error) {
     return handleError(error, `Erreur lors de la récupération de la demande ${requestId}`);
@@ -536,10 +543,33 @@ export const getOffersByRequestId = async (requestId: string): Promise<Offer[]> 
   try {
     const { data, error } = await supabase
       .from('offers')
-      .select('*, prestataires:prestataire_id(*)')
+      .select(`
+        *,
+        prestataires:prestataire_id(
+          id, 
+          name, 
+          email, 
+          profile_picture, 
+          profile_picture_base64
+        )
+      `)
       .eq('request_id', requestId);
       
     if (error) throw error;
+    
+    // Formatage des données pour faciliter l'affichage
+    if (data && data.length > 0) {
+      return data.map(offer => {
+        // Extraire le prénom et la photo de profil du prestataire
+        const prestataire = offer.prestataires || {};
+        return {
+          ...offer,
+          prestataire_name: prestataire.name || prestataire.email?.split('@')[0] || 'Prestataire',
+          prestataire_profile_picture: prestataire.profile_picture_base64 || prestataire.profile_picture || null
+        };
+      });
+    }
+    
     return data as Offer[];
   } catch (error) {
     return handleError(error, `Erreur lors de la récupération des offres pour la demande ${requestId}`);
@@ -678,6 +708,16 @@ export const acceptOffer = async (offerId: string): Promise<Offer> => {
     } catch (notificationError) {
       console.error('Erreur lors de l\'envoi de la notification:', notificationError);
       // Ne pas échouer si la notification échoue
+    }
+    
+    // 6. Récupérer et retourner les données du job créé si disponible
+    try {
+      if (jobData && jobData[0]) {
+        console.log('Job créé:', jobData[0].id);
+        return { ...updatedOffer, jobId: jobData[0].id } as any;
+      }
+    } catch (e) {
+      console.error('Erreur lors de la récupération du job:', e);
     }
     
     return updatedOffer as Offer;
@@ -1096,6 +1136,45 @@ export const getClientById = async (clientId: string) => {
   }
 };
 
+export const getUserReviewStats = async (userId: string) => {
+  try {
+    // Récupérer toutes les reviews de l'utilisateur
+    const { data, error } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('reviewed_user_id', userId);
+      
+    if (error) throw error;
+    
+    // Calculer la note moyenne et le nombre de reviews
+    if (!data || data.length === 0) {
+      return {
+        user_id: userId,
+        review_count: 0,
+        average_rating: 0
+      };
+    }
+    
+    const review_count = data.length;
+    const total_rating = data.reduce((sum, review) => sum + review.rating, 0);
+    const average_rating = total_rating / review_count;
+    
+    return {
+      user_id: userId,
+      review_count,
+      average_rating
+    };
+  } catch (error) {
+    console.error(`Erreur lors de la récupération des reviews pour l'utilisateur ${userId}:`, error);
+    // Retourner des statistiques par défaut pour éviter de casser l'UI
+    return {
+      user_id: userId,
+      review_count: 0,
+      average_rating: 0
+    };
+  }
+};
+
 export const updateUserProfile = async (userId: string, profileData: Partial<any>) => {
   try {
     const { data, error } = await supabase
@@ -1244,6 +1323,20 @@ export const getUserLocation = async (userId: string): Promise<LocationCoordinat
   return getLocation(userId);
 };
 
+// Fonction utilitaire pour vérifier si une adresse a les coordonnées exactes
+export const verifyAddressCoordinates = async (address: string): Promise<LocationCoordinates | null> => {
+  if (!address) return null;
+  
+  try {
+    // Import dynamique pour éviter les dépendances circulaires
+    const { geocodeAddress } = require('./location');
+    return await geocodeAddress(address);
+  } catch (error) {
+    console.error('Error verifying address coordinates:', error);
+    return null;
+  }
+};
+
 // Fonction pour obtenir les prestataires à proximité
 export const getNearbyPrestataires = async (
   serviceId: string,
@@ -1317,5 +1410,90 @@ export const getKycStatus = async (userId: string): Promise<KYCStatus | null> =>
   } catch (error) {
     console.error(`Erreur lors de la récupération du statut KYC pour l'utilisateur ${userId}:`, error);
     return null;
+  }
+};
+
+// Fonction pour récupérer les avis d'un utilisateur
+export const getUserReviews = async (userId: string) => {
+  try {
+    // Récupérer les avis où l'utilisateur est le prestataire
+    const { data, error } = await supabase
+      .from('reviews')
+      .select('*, reviewer:reviewer_id(email, profile_picture)')
+      .eq('reviewed_user_id', userId)
+      .order('created_at', { ascending: false });
+      
+    if (error) throw error;
+    
+    // Récupérer aussi les statistiques d'avis (note moyenne, etc.)
+    const { data: statsData, error: statsError } = await supabase
+      .from('user_review_stats')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+      
+    if (statsError) {
+      console.warn('Erreur lors de la récupération des statistiques d\'avis:', statsError);
+    }
+    
+    return { 
+      reviews: data || [], 
+      stats: statsData || { 
+        user_id: userId,
+        avg_rating: 0,
+        total_reviews: 0
+      } 
+    };
+  } catch (error) {
+    console.error(`Erreur lors de la récupération des avis pour l'utilisateur ${userId}:`, error);
+    return { 
+      reviews: [], 
+      stats: { 
+        user_id: userId,
+        avg_rating: 0,
+        total_reviews: 0
+      } 
+    };
+  }
+};
+
+// Fonction pour annuler une demande
+export const cancelRequest = async (requestId: string): Promise<Request> => {
+  try {
+    // Vérifier d'abord l'état actuel de la demande
+    const { data: requestData, error: requestError } = await supabase
+      .from('requests')
+      .select('status, client_id')
+      .eq('id', requestId)
+      .single();
+      
+    if (requestError) throw requestError;
+    
+    // Vérifier que la demande peut être annulée (uniquement si en attente ou avec offres)
+    if (requestData.status !== RequestStatus.PENDING && requestData.status !== RequestStatus.OFFERED) {
+      throw new ApiError(`Impossible d'annuler une demande qui est déjà ${requestData.status}`, 400);
+    }
+    
+    // Procéder à l'annulation
+    const { data, error } = await supabase
+      .from('requests')
+      .update({ status: RequestStatus.CANCELLED })
+      .eq('id', requestId)
+      .select()
+      .single();
+      
+    if (error) throw error;
+    
+    // Rejeter toutes les offres en attente associées à cette demande
+    await supabase
+      .from('offers')
+      .update({ status: OfferStatus.REJECTED })
+      .eq('request_id', requestId)
+      .eq('status', OfferStatus.PENDING);
+    
+    // Retourner la demande mise à jour
+    return data as Request;
+  } catch (error) {
+    return handleError(error, `Erreur lors de l'annulation de la demande ${requestId}`);
   }
 };

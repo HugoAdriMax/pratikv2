@@ -1,3 +1,6 @@
+import 'react-native-gesture-handler';
+// Importer le script pour désactiver le bandeau de développement avant tout
+import './disableDevMenu';
 import { registerRootComponent } from 'expo';
 import App from './App';
 

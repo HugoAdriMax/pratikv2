@@ -14,10 +14,17 @@ import { Request, RequestStatus } from '../../types';
 import { COLORS, SHADOWS, SPACING, BORDER_RADIUS } from '../../utils/theme';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Text, Card, Badge } from '../../components/ui';
+import { Text, Card, Badge, Button } from '../../components/ui';
 
+/**
+ * Écran des demandes de service pour un client utilisant le design system
+ * Version hybride qui combine StyleSheet et composants du design system
+ */
 const RequestsScreen = ({ navigation }: any) => {
   const [requests, setRequests] = useState<Request[]>([]);
+  const [activeRequests, setActiveRequests] = useState<Request[]>([]);
+  const [cancelledRequests, setCancelledRequests] = useState<Request[]>([]);
+  const [showCancelled, setShowCancelled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const { user } = useAuth();
@@ -29,7 +36,14 @@ const RequestsScreen = ({ navigation }: any) => {
     try {
       setLoading(true);
       const data = await getClientRequests(user.id);
+      
+      // Séparer les demandes actives et annulées
+      const active = data.filter(req => req.status !== RequestStatus.CANCELLED);
+      const cancelled = data.filter(req => req.status === RequestStatus.CANCELLED);
+      
       setRequests(data);
+      setActiveRequests(active);
+      setCancelledRequests(cancelled);
     } catch (error) {
       console.error('Error fetching requests:', error);
     } finally {
@@ -54,6 +68,7 @@ const RequestsScreen = ({ navigation }: any) => {
     // Set up periodic refresh to check for new offers
     const refreshInterval = setInterval(() => {
       fetchRequests();
+      console.log('Rafraîchissement automatique des demandes...');
     }, 10000); // Check every 10 seconds
 
     return () => {
@@ -95,7 +110,7 @@ const RequestsScreen = ({ navigation }: any) => {
   };
 
   const getServiceIcon = (serviceId: string) => {
-    // Convert serviceId to a readable service name (in a real app, you'd look up the real name)
+    // Convert serviceId to a readable service name
     const serviceName = serviceId.split('-')[0].toLowerCase();
     
     // Match appropriate icon based on service type
@@ -121,78 +136,159 @@ const RequestsScreen = ({ navigation }: any) => {
     
     const badgeProps = getStatusBadgeProps(item);
     const serviceIcon = getServiceIcon(item.service_id);
+    const hasOffers = item.status === RequestStatus.OFFERED;
+    const isCompleted = item.status === RequestStatus.COMPLETED || item.prestataire_status === 'completed';
+    const isInProgress = item.prestataire_status === 'in_progress' || item.prestataire_status === 'arrived' || item.prestataire_status === 'en_route';
     
+    // Style simple et efficace
     return (
-      <Card
-        style={styles.requestCard}
-        elevation="sm"
+      <TouchableOpacity
+        activeOpacity={0.9}
         onPress={() => navigation.navigate('RequestDetail', { requestId: item.id })}
       >
-        <View style={styles.cardHeader}>
-          <View style={styles.serviceContainer}>
-            <View style={styles.iconContainer}>
-              <Ionicons name={serviceIcon} size={20} color={COLORS.primary} />
+        <Card 
+          style={[
+            styles.requestCard,
+            hasOffers && styles.offersCard,
+            isInProgress && styles.inProgressCard,
+            isCompleted && styles.completedCard
+          ]}
+          elevation="sm"
+        >
+          <View style={styles.cardHeader}>
+            {/* Icône et nom du service */}
+            <View style={styles.serviceSection}>
+              <View style={[
+                styles.iconContainer,
+                hasOffers && styles.offersIcon,
+                isInProgress && styles.inProgressIcon,
+                isCompleted && styles.completedIcon
+              ]}>
+                <Ionicons 
+                  name={serviceIcon as any} 
+                  size={20} 
+                  color="#FFFFFF" 
+                />
+              </View>
+              <Text variant="subtitle1" weight="bold" style={styles.serviceTitle}>
+                {item.services?.name || item.service_id.replace(/-/g, ' ').split(' ')[0]}
+              </Text>
             </View>
-            <Text variant="h5" weight="semibold" style={styles.marginLeft}>
-              {item.service_id.replace(/-/g, ' ').split(' ')[0]}
-            </Text>
+            
+            {/* Badge de statut */}
+            <Badge
+              variant={badgeProps.variant as any}
+              label={badgeProps.label}
+              size="sm"
+              border
+            />
           </View>
-          <Badge 
-            variant={badgeProps.variant as any} 
-            label={badgeProps.label} 
-            size="sm"
-            border
-          />
-        </View>
-        
-        <View style={styles.separator} />
-        
-        <View style={styles.locationContainer}>
-          <Ionicons name="location-outline" size={18} color={COLORS.textSecondary} />
-          <Text 
-            variant="body2" 
-            color="text-secondary" 
-            style={styles.marginLeft} 
-            numberOfLines={1}
-          >
-            {item.location.address}
-          </Text>
-        </View>
-        
-        <View style={styles.cardFooter}>
-          <View style={styles.dateContainer}>
-            <Ionicons name="calendar-outline" size={16} color={COLORS.textSecondary} />
-            <Text variant="caption" color="text-secondary" style={styles.marginLeft}>
-              {formattedDate}
+          
+          {/* Indicateur spécial pour offres disponibles */}
+          {hasOffers && (
+            <View style={styles.offersIndicator}>
+              <Ionicons name="people" size={14} color={COLORS.info} />
+              <Text variant="caption" weight="medium" color="info" style={styles.indicatorText}>
+                Des prestataires ont répondu à votre demande
+              </Text>
+            </View>
+          )}
+          
+          {/* Indicateur de progression pour travaux en cours */}
+          {isInProgress && (
+            <View style={styles.progressContainer}>
+              <View style={styles.progressBar}>
+                <View 
+                  style={[
+                    styles.progressFill,
+                    { 
+                      width: item.prestataire_status === 'en_route' ? '30%' : 
+                             item.prestataire_status === 'arrived' ? '60%' : '85%'
+                    }
+                  ]} 
+                />
+              </View>
+              <Text variant="caption" color="text-secondary" style={styles.progressLabel}>
+                {item.prestataire_status === 'en_route' ? 'Prestataire en route' : 
+                 item.prestataire_status === 'arrived' ? 'Prestataire arrivé' : 'Travail en cours'}
+              </Text>
+            </View>
+          )}
+          
+          {/* Rappel d'évaluation pour travaux terminés - uniquement si pas encore évalué */}
+          {isCompleted && !item.is_reviewed && (
+            <View style={styles.reviewReminder}>
+              <Ionicons name="star-outline" size={14} color={COLORS.success} />
+              <Text variant="caption" weight="medium" color="success" style={styles.indicatorText}>
+                N'oubliez pas d'évaluer cette prestation
+              </Text>
+            </View>
+          )}
+          
+          {/* Adresse */}
+          <View style={styles.locationRow}>
+            <Ionicons name="location-outline" size={14} color={COLORS.textSecondary} />
+            <Text variant="caption" color="text-secondary" style={styles.locationText} numberOfLines={1}>
+              {item.location.address}
             </Text>
           </View>
           
-          <View style={styles.urgencyContainer}>
-            <Text variant="caption" color="text-secondary" style={styles.urgencyLabel}>
-              Urgence:
-            </Text>
-            <View style={styles.urgencyDots}>
-              {[1, 2, 3, 4, 5].map(dot => (
-                <View
-                  key={dot}
-                  style={[
-                    styles.urgencyDot,
-                    dot <= item.urgency ? styles.activeDot : styles.inactiveDot
-                  ]}
-                />
-              ))}
+          {/* Pied de carte avec date et bouton/indicateur selon le statut */}
+          <View style={styles.cardFooter}>
+            <View style={styles.dateRow}>
+              <Ionicons name="calendar-outline" size={12} color={COLORS.textSecondary} />
+              <Text variant="caption" color="text-secondary" style={{marginLeft: 4}}>
+                {formattedDate}
+              </Text>
             </View>
+            
+            {hasOffers && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="info">
+                  Voir les offres
+                </Text>
+                <Ionicons name="chevron-forward" size={12} color={COLORS.info} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
+            
+            {isInProgress && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="primary">
+                  {item.prestataire_status === 'en_route' ? 'Suivre' : 'Voir détails'}
+                </Text>
+                <Ionicons 
+                  name={item.prestataire_status === 'en_route' ? 'map-outline' : 'eye-outline'} 
+                  size={12} 
+                  color={COLORS.primary} 
+                  style={{marginLeft: 2}} 
+                />
+              </TouchableOpacity>
+            )}
+            
+            {isCompleted && !item.is_reviewed && (
+              <TouchableOpacity 
+                style={styles.actionButton} 
+                activeOpacity={0.8} 
+                onPress={() => navigation.navigate('ReviewScreen', { jobId: item.id })}
+              >
+                <Text variant="caption" weight="semibold" color="success">
+                  Évaluer
+                </Text>
+                <Ionicons name="star-outline" size={12} color={COLORS.success} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
+            
+            {(isCompleted && item.is_reviewed) || (!hasOffers && !isInProgress && !isCompleted) && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="text-secondary">
+                  Détails
+                </Text>
+                <Ionicons name="chevron-forward" size={12} color={COLORS.textSecondary} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
           </View>
-        </View>
-        
-        {item.status === RequestStatus.OFFERED && (
-          <View style={styles.offersBadge}>
-            <Text variant="caption" weight="semibold" color="light">
-              Nouvelles offres
-            </Text>
-          </View>
-        )}
-      </Card>
+        </Card>
+      </TouchableOpacity>
     );
   };
 
@@ -208,9 +304,26 @@ const RequestsScreen = ({ navigation }: any) => {
     <SafeAreaView style={[styles.container, { paddingBottom: insets.bottom }]}>
       <View style={styles.header}>
         <Text variant="h3" weight="semibold">Mes demandes</Text>
+        
+        {cancelledRequests.length > 0 && (
+          <TouchableOpacity 
+            style={styles.toggleButton} 
+            onPress={() => setShowCancelled(!showCancelled)}
+          >
+            <Text variant="caption" color={showCancelled ? "primary" : "text-secondary"}>
+              {showCancelled ? "Masquer les annulées" : `Afficher les annulées (${cancelledRequests.length})`}
+            </Text>
+            <Ionicons 
+              name={showCancelled ? "chevron-up-outline" : "chevron-down-outline"} 
+              size={16} 
+              color={showCancelled ? COLORS.primary : COLORS.textSecondary} 
+              style={{ marginLeft: 4 }}
+            />
+          </TouchableOpacity>
+        )}
       </View>
       
-      {requests.length === 0 ? (
+      {activeRequests.length === 0 && !showCancelled ? (
         <View style={styles.emptyContainer}>
           <View style={styles.emptyIconContainer}>
             <Ionicons name="document-text-outline" size={60} color={COLORS.textSecondary} />
@@ -218,32 +331,50 @@ const RequestsScreen = ({ navigation }: any) => {
           <Text variant="body1" color="text-secondary" style={styles.emptyText}>
             Vous n'avez pas encore de demandes
           </Text>
-          <TouchableOpacity
-            style={styles.newRequestButton}
+          <Button
+            variant="primary"
+            label="Nouvelle demande"
             onPress={() => navigation.navigate('Chatbot')}
-            activeOpacity={0.8}
-          >
-            <Text variant="button" weight="semibold" color="light">
-              Nouvelle demande
-            </Text>
-          </TouchableOpacity>
+            style={styles.newRequestButton}
+          />
         </View>
       ) : (
-        <FlatList
-          data={requests}
-          renderItem={renderItem}
-          keyExtractor={item => item.id}
-          contentContainerStyle={styles.listContainer}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl 
-              refreshing={refreshing} 
-              onRefresh={handleRefresh} 
-              colors={[COLORS.primary]}
-              tintColor={COLORS.primary}
-            />
-          }
-        />
+        <>
+          {/* Demandes actives */}
+          <FlatList
+            data={showCancelled ? cancelledRequests : activeRequests}
+            renderItem={renderItem}
+            keyExtractor={item => item.id}
+            contentContainerStyle={styles.listContainer}
+            showsVerticalScrollIndicator={false}
+            ListHeaderComponent={showCancelled ? (
+              <View style={styles.sectionHeader}>
+                <Text variant="h5" weight="semibold" color="danger">Demandes annulées</Text>
+                <Text variant="body2" color="text-secondary" style={styles.sectionSubtitle}>
+                  Ces demandes ont été annulées et ne sont plus visibles par les prestataires
+                </Text>
+              </View>
+            ) : undefined}
+            refreshControl={
+              <RefreshControl 
+                refreshing={refreshing} 
+                onRefresh={handleRefresh} 
+                colors={[COLORS.primary]}
+                tintColor={COLORS.primary}
+              />
+            }
+            ListEmptyComponent={
+              <View style={styles.emptyListContainer}>
+                <Text variant="body2" color="text-secondary">
+                  {showCancelled 
+                    ? "Aucune demande annulée"
+                    : "Aucune demande active"
+                  }
+                </Text>
+              </View>
+            }
+          />
+        </>
       )}
       
       <TouchableOpacity
@@ -270,6 +401,32 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
     ...SHADOWS.small,
     marginBottom: SPACING.sm,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  toggleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.sm,
+    backgroundColor: `${COLORS.backgroundDark}50`,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  sectionHeader: {
+    paddingVertical: SPACING.sm,
+    marginBottom: SPACING.md,
+    backgroundColor: `${COLORS.danger}08`,
+    borderRadius: BORDER_RADIUS.md,
+    paddingHorizontal: SPACING.md,
+  },
+  sectionSubtitle: {
+    marginTop: SPACING.xs,
+  },
+  emptyListContainer: {
+    padding: SPACING.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   loaderContainer: {
     flex: 1,
@@ -279,81 +436,10 @@ const styles = StyleSheet.create({
   },
   listContainer: {
     padding: SPACING.md,
-    paddingTop: SPACING.sm,
+    paddingTop: SPACING.xs,
   },
-  requestCard: {
-    marginBottom: SPACING.md,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: SPACING.sm,
-  },
-  serviceContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  iconContainer: {
-    backgroundColor: `${COLORS.primary}15`,
-    borderRadius: BORDER_RADIUS.round,
-    width: 36,
-    height: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  separator: {
-    height: 1,
-    backgroundColor: COLORS.border,
-    marginVertical: SPACING.sm,
-  },
-  locationContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: SPACING.sm,
-  },
-  cardFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: SPACING.xs,
-  },
-  dateContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  urgencyContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  urgencyLabel: {
-    marginRight: 4,
-  },
-  urgencyDots: {
-    flexDirection: 'row',
-  },
-  urgencyDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginHorizontal: 2,
-  },
-  activeDot: {
-    backgroundColor: COLORS.warning,
-  },
-  inactiveDot: {
-    backgroundColor: COLORS.backgroundDark,
-  },
-  offersBadge: {
-    position: 'absolute',
-    top: -8,
-    right: -8,
-    backgroundColor: COLORS.accent,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: BORDER_RADIUS.round,
-    ...SHADOWS.small,
-  },
+  
+  // Styles pour l'interface de la liste vide
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -362,9 +448,9 @@ const styles = StyleSheet.create({
   },
   emptyIconContainer: {
     backgroundColor: `${COLORS.textSecondary}15`,
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: SPACING.md,
@@ -374,26 +460,156 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   newRequestButton: {
-    backgroundColor: COLORS.primary,
     paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    borderRadius: BORDER_RADIUS.md,
-    ...SHADOWS.small,
   },
+  
+  // Bouton flottant d'ajout
   fab: {
     position: 'absolute',
     bottom: 20,
     right: 20,
     backgroundColor: COLORS.primary,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     justifyContent: 'center',
     alignItems: 'center',
     ...SHADOWS.medium,
   },
-  marginLeft: {
-    marginLeft: SPACING.sm,
+  
+  // Styles des cartes de demande
+  requestCard: {
+    marginBottom: SPACING.sm,
+    padding: SPACING.sm,
+    backgroundColor: COLORS.white,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  offersCard: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.info,
+  },
+  inProgressCard: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.warning,
+  },
+  completedCard: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.success,
+  },
+  
+  // En-tête de carte
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  serviceSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  serviceTitle: {
+    marginLeft: SPACING.xs,
+    fontSize: 14,
+    textTransform: 'capitalize',
+    flex: 1,
+  },
+  
+  // Conteneur d'icône
+  iconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...SHADOWS.small,
+  },
+  offersIcon: {
+    backgroundColor: COLORS.info,
+  },
+  inProgressIcon: {
+    backgroundColor: COLORS.warning,
+  },
+  completedIcon: {
+    backgroundColor: COLORS.success,
+  },
+  
+  // Indicateurs d'état spécifiques
+  offersIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${COLORS.info}15`,
+    padding: 6,
+    borderRadius: BORDER_RADIUS.sm,
+    marginBottom: SPACING.xs,
+  },
+  reviewReminder: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${COLORS.success}15`,
+    padding: 6,
+    borderRadius: BORDER_RADIUS.sm,
+    marginBottom: SPACING.xs,
+  },
+  indicatorText: {
+    marginLeft: 4,
+  },
+  
+  // Barre de progression pour travaux en cours
+  progressContainer: {
+    marginBottom: SPACING.xs,
+  },
+  progressBar: {
+    height: 4,
+    backgroundColor: `${COLORS.backgroundDark}30`,
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginBottom: 3,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: COLORS.warning,
+    borderRadius: 2,
+  },
+  progressLabel: {
+    textAlign: 'right',
+    fontSize: 10,
+  },
+  
+  // Ligne d'adresse
+  locationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  locationText: {
+    marginLeft: 4,
+    flex: 1,
+  },
+  
+  // Pied de carte
+  cardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: `${COLORS.border}50`,
+    paddingTop: SPACING.xs,
+    marginTop: SPACING.xs,
+  },
+  dateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${COLORS.backgroundDark}15`,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
   },
 });
 

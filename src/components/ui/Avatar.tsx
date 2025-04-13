@@ -67,7 +67,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     if (source) {
       return (
         <Image
-          source={typeof source === 'number' ? source : source}
+          source={source}
           style={[styles.image, avatarSize]}
           resizeMode="cover"
         />

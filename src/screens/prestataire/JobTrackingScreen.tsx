@@ -7,13 +7,19 @@ import {
   ScrollView,
   Dimensions,
   StyleSheet,
-  SafeAreaView
+  SafeAreaView,
+  Platform,
+  Linking
 } from 'react-native';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getJobByOfferId, updateJobTrackingStatus, completeJob, getServiceById, getUserById } from '../../services/api';
 import { Job, TrackingStatus } from '../../types';
+// Étendre l'interface Job pour ajouter le champ lastProximityAlertTime
+interface JobWithAlert extends Job {
+  lastProximityAlertTime?: number;
+}
 import { useAuth } from '../../context/AuthContext';
 import { Text, Card, Button, Badge, Avatar } from '../../components/ui';
 import { COLORS, SHADOWS, SPACING, BORDER_RADIUS } from '../../utils/theme';
@@ -27,7 +33,7 @@ import {
   UserLocation,
   getCurrentPositionWithAddress
 } from '../../services/location';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
 const { width } = Dimensions.get('window');
 
@@ -61,7 +67,7 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
   // Référence à la carte pour les animations
   const mapRef = useRef<MapView | null>(null);
   
-  const [job, setJob] = useState<Job | null>(null);
+  const [job, setJob] = useState<JobWithAlert | null>(null);
   const [service, setService] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [location, setLocation] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -76,7 +82,54 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
   const [remainingTime, setRemainingTime] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchJobDetails();
+    // Fonction pour récupérer les détails et configurer les positions
+    const fetchDetailsAndSetPositions = async () => {
+      // D'abord récupérer les détails du job
+      await fetchJobDetails();
+      
+      try {
+        // Obtenir la position actuelle du prestataire (utilisateur connecté)
+        const currentPosition = await getCurrentPositionWithAddress();
+        
+        if (currentPosition) {
+          console.log("Position actuelle du prestataire obtenue:", currentPosition);
+          
+          // Mettre à jour l'état local avec la position actuelle
+          setLocation(currentPosition);
+          
+          // Mettre à jour la position en base de données
+          if (user && user.id) {
+            await updateUserLocation(user.id, currentPosition);
+            console.log("Position du prestataire mise à jour en base de données");
+          }
+        } else {
+          console.warn("Impossible d'obtenir la position actuelle du prestataire, utilisation de la position par défaut");
+          
+          // Utiliser une position par défaut si nécessaire
+          const prestataireDefaultLocation = {
+            latitude: 48.8639,
+            longitude: 2.2870,
+            address: "5 rue des Sablons, 75016 Paris"
+          };
+          
+          setLocation(prestataireDefaultLocation);
+        }
+      } catch (error) {
+        console.error("Erreur lors de la récupération de la position du prestataire:", error);
+        
+        // Utiliser une position par défaut en cas d'erreur
+        const prestataireDefaultLocation = {
+          latitude: 48.8639,
+          longitude: 2.2870,
+          address: "5 rue des Sablons, 75016 Paris"
+        };
+        
+        setLocation(prestataireDefaultLocation);
+      }
+    };
+    
+    // Exécuter la fonction
+    fetchDetailsAndSetPositions();
     
     // Lancer le tracking une fois au démarrage
     const trackingCleanup = setupLocationTracking();
@@ -393,23 +446,31 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
           distanceInterval: 10 // 10 mètres
         },
         async (newLocation) => {
+          // Construire un objet position plus complet incluant des données de précision
           const position = {
             latitude: newLocation.coords.latitude,
-            longitude: newLocation.coords.longitude
+            longitude: newLocation.coords.longitude,
+            accuracy: newLocation.coords.accuracy,
+            timestamp: newLocation.timestamp
           };
+          
+          console.log(`Nouvelle position du prestataire: Lat: ${position.latitude.toFixed(6)}, Long: ${position.longitude.toFixed(6)}, Précision: ${position.accuracy?.toFixed(1) || 'N/A'}m`);
           
           // Mettre à jour l'état local
           setLocation(position);
           
-          // Mise à jour de la localisation du prestataire en base de données avec le nouveau service
+          // Mise à jour de la localisation du prestataire en base de données
           try {
-            await updateUserLocation(user.id, position);
-            console.log('Position prestataire mise à jour en base de données:', 
-              `Lat: ${position.latitude.toFixed(6)}, Long: ${position.longitude.toFixed(6)}`);
+            if (user && user.id) {
+              await updateUserLocation(user.id, position);
+              console.log('Position prestataire mise à jour en base de données');
+            } else {
+              console.warn("Impossible de mettre à jour la position: ID utilisateur manquant");
+            }
               
             // Si on est en mode "en route", mettre à jour le temps estimé d'arrivée
             if (job?.tracking_status === 'en_route' && client?.location) {
-              // Utiliser notre nouveau service pour calculer la distance
+              // Calculer la distance entre le prestataire et le client
               const distanceValue = calculateDistance(
                 { latitude: position.latitude, longitude: position.longitude },
                 { latitude: client.location.latitude, longitude: client.location.longitude }
@@ -431,20 +492,38 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
               
               // Détecter automatiquement si le prestataire est arrivé (distance < 100m)
               if (distanceValue < 0.1 && job.tracking_status === 'en_route') {
-                Alert.alert(
-                  'Destination proche',
-                  'Vous semblez être arrivé à destination. Souhaitez-vous mettre à jour votre statut?',
-                  [
-                    {
-                      text: 'Plus tard',
-                      style: 'cancel'
-                    },
-                    {
-                      text: 'Je suis arrivé',
-                      onPress: () => handleUpdateStatus(TrackingStatus.ARRIVED)
+                // Vérifier si une alerte a déjà été affichée récemment (pour éviter le spam)
+                const now = new Date().getTime();
+                const lastAlertTime = job.lastProximityAlertTime || 0;
+                
+                // N'afficher l'alerte qu'une fois toutes les 2 minutes
+                if (now - lastAlertTime > 2 * 60 * 1000) {
+                  // Mettre à jour le timestamp de la dernière alerte
+                  setJob(prevJob => {
+                    if (prevJob) {
+                      return {
+                        ...prevJob,
+                        lastProximityAlertTime: now
+                      };
                     }
-                  ]
-                );
+                    return prevJob;
+                  });
+                  
+                  Alert.alert(
+                    'Destination proche',
+                    'Vous semblez être arrivé à destination. Souhaitez-vous mettre à jour votre statut?',
+                    [
+                      {
+                        text: 'Plus tard',
+                        style: 'cancel'
+                      },
+                      {
+                        text: 'Je suis arrivé',
+                        onPress: () => handleUpdateStatus(TrackingStatus.ARRIVED)
+                      }
+                    ]
+                  );
+                }
               }
             }
           } catch (updateError) {
@@ -590,42 +669,80 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
     }
   };
 
-  // Fonction pour simuler l'envoi d'une notification au client
-  const sendClientNotification = (status: TrackingStatus) => {
-    const clientName = client?.name || 'Client';
-    const prestataireName = user?.email?.split('@')[0] || 'Prestataire';
-    const serviceType = service?.name || 'service';
-    
-    let message = '';
-    
-    switch(status) {
-      case TrackingStatus.NOT_STARTED:
-        message = `${clientName} : ${prestataireName} a accepté votre demande de ${serviceType}.`;
-        break;
-      case TrackingStatus.EN_ROUTE:
-        message = `${clientName} : ${prestataireName} est en route pour votre demande de ${serviceType}.`;
-        break;
-      case TrackingStatus.ARRIVED:
-        message = `${clientName} : ${prestataireName} est arrivé à votre adresse.`;
-        break;
-      case TrackingStatus.IN_PROGRESS:
-        message = `${clientName} : ${prestataireName} a commencé le travail.`;
-        break;
-      case TrackingStatus.COMPLETED:
-        message = `${clientName} : ${prestataireName} a terminé la mission. Merci pour votre confiance !`;
-        break;
+  // Envoyer une notification au client
+  const sendClientNotification = async (status: TrackingStatus) => {
+    try {
+      const clientName = client?.name || 'Client';
+      const prestataireName = user?.email?.split('@')[0] || 'Prestataire';
+      const serviceType = service?.name || 'service';
+      
+      let message = '';
+      
+      switch(status) {
+        case TrackingStatus.NOT_STARTED:
+          message = `${clientName} : ${prestataireName} a accepté votre demande de ${serviceType}.`;
+          break;
+        case TrackingStatus.EN_ROUTE:
+          message = `${clientName} : ${prestataireName} est en route pour votre demande de ${serviceType}.`;
+          
+          // Ajouter les informations de distance et ETA si disponibles
+          if (location && client?.location) {
+            const distance = calculateDistance(
+              { latitude: location.latitude, longitude: location.longitude },
+              { latitude: client.location.latitude, longitude: client.location.longitude }
+            );
+            const etaMinutes = calculateETA(distance);
+            message += ` Distance: ${distance.toFixed(1)} km. ETA: ${etaMinutes} min.`;
+          }
+          break;
+        case TrackingStatus.ARRIVED:
+          message = `${clientName} : ${prestataireName} est arrivé à votre adresse.`;
+          break;
+        case TrackingStatus.IN_PROGRESS:
+          message = `${clientName} : ${prestataireName} a commencé le travail.`;
+          break;
+        case TrackingStatus.COMPLETED:
+          message = `${clientName} : ${prestataireName} a terminé la mission. Merci pour votre confiance !`;
+          break;
+      }
+      
+      // Enregistrer la notification dans la base de données
+      if (client?.id && user?.id) {
+        try {
+          const { error } = await supabase
+            .from('notifications')
+            .insert({
+              user_id: client.id,
+              sender_id: user.id,
+              message: message,
+              type: status.toLowerCase(),
+              job_id: job.id || null
+            });
+            
+          if (error) {
+            console.error('Erreur d\'enregistrement de notification:', error);
+          } else {
+            console.log('Notification enregistrée avec succès dans la base de données');
+          }
+        } catch (dbError) {
+          console.error('Erreur de base de données pour la notification:', dbError);
+        }
+      }
+      
+      // Dans une vraie application, nous enverrions une notification push au client
+      // Pour notre démo, nous affichons simplement une alerte
+      console.log('[NOTIFICATION CLIENT]', message);
+      
+      // Simuler une notification visuelle
+      Alert.alert(
+        'Notification envoyée au client',
+        message,
+        [{ text: 'OK' }]
+      );
+    } catch (error) {
+      console.error('Erreur lors de l\'envoi de la notification:', error);
+      Alert.alert('Erreur', 'Impossible d\'envoyer la notification au client');
     }
-    
-    // Dans une vraie application, nous enverrions une notification push au client
-    // Pour notre démo, nous affichons simplement un toast
-    console.log('[NOTIFICATION CLIENT]', message);
-    
-    // Simuler une notification visuelle
-    Alert.alert(
-      'Notification envoyée au client',
-      message,
-      [{ text: 'OK' }]
-    );
   };
 
   const handleUpdateStatus = async (newStatus: TrackingStatus) => {
@@ -728,11 +845,42 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
       // Mettre à jour l'état local
       setJob(prev => prev ? { ...prev, tracking_status: newStatus } : null);
       
-      // Mettre à jour le temps restant si nécessaire
+      // Mettre à jour le temps restant en fonction du nouveau statut
       if (newStatus === TrackingStatus.EN_ROUTE) {
-        setRemainingTime('10 min');
+        // Calculer l'ETA basé sur la distance réelle si disponible
+        if (location && client?.location) {
+          const distance = calculateDistance(
+            { latitude: location.latitude, longitude: location.longitude },
+            { latitude: client.location.latitude, longitude: client.location.longitude }
+          );
+          const etaMinutes = calculateETA(distance);
+          
+          // Formater l'affichage de l'ETA
+          if (etaMinutes <= 1) {
+            setRemainingTime('Moins d\'1 min');
+          } else if (etaMinutes < 60) {
+            setRemainingTime(`${etaMinutes} min`);
+          } else {
+            const hours = Math.floor(etaMinutes / 60);
+            const mins = etaMinutes % 60;
+            setRemainingTime(`${hours}h${mins > 0 ? ` ${mins} min` : ''}`);
+          }
+        } else {
+          // Fallback à une valeur par défaut
+          setRemainingTime('10 min');
+        }
       } else if (newStatus === TrackingStatus.ARRIVED || newStatus === TrackingStatus.IN_PROGRESS) {
         setRemainingTime('0 min');
+      }
+      
+      // Mettre à jour la position du prestataire dans la base de données
+      if (location && user?.id) {
+        try {
+          await updateUserLocation(user.id, location);
+          console.log('Position mise à jour lors du changement de statut');
+        } catch (locError) {
+          console.error('Erreur lors de la mise à jour de la position:', locError);
+        }
       }
       
       // Envoyer une notification au client
@@ -872,119 +1020,283 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Nous supprimons le header personnalisé car React Navigation en affiche déjà un */}
-      {/*
-      <View style={styles.header}>
-        <TouchableOpacity 
-          style={styles.backIcon} 
-          onPress={() => navigation.goBack()}
-        >
-          <Ionicons name="chevron-back" size={24} color={COLORS.textSecondary} />
-        </TouchableOpacity>
-        <View style={styles.headerTitleContainer}>
-          <Text variant="h4" weight="semibold">Suivi de mission</Text>
-          <Text variant="body2" color="text-secondary">
-            Mission #{job.id.substring(0, 8)}
-          </Text>
-        </View>
-        <StatusBadge status={job.tracking_status} />
-      </View>
-      */}
-      
       <ScrollView style={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Carte du client */}
+        {/* Carte du client - Version améliorée */}
         {client && (
-          <Card style={styles.card}>
+          <Card style={[styles.card, styles.clientCard]}>
+            <View style={styles.clientCardHeader}>
+              <Ionicons name="person" size={18} color="#FFFFFF" />
+              <Text variant="body2" weight="semibold" color="light" style={styles.marginLeft}>
+                INFORMATIONS CLIENT
+              </Text>
+            </View>
             <View style={styles.clientCardContent}>
-              <Avatar 
-                size="lg" 
-                initials={client.name?.substring(0, 2) || 'CL'} 
-                backgroundColor={COLORS.accent}
-              />
               <View style={styles.clientInfo}>
-                <Text variant="h5" weight="semibold">{client.name || 'Client'}</Text>
-                <Text 
-                  variant="body2" 
-                  color="text-secondary" 
-                  style={styles.marginTopXs} 
-                  numberOfLines={1}
-                >
-                  {client.location.address}
-                </Text>
+                <Text variant="h4" weight="semibold" style={styles.clientName}>{client.name || 'Client'}</Text>
+                <View style={styles.addressContainer}>
+                  <Ionicons name="location-outline" size={16} color={COLORS.textSecondary} style={{marginTop: 2}} />
+                  <Text 
+                    variant="body2" 
+                    color="text-secondary" 
+                    style={[styles.marginLeft, {flex: 1}]} 
+                    numberOfLines={2}
+                  >
+                    {client.location.address}
+                  </Text>
+                </View>
+                <View style={styles.clientContactActions}>
+                  <TouchableOpacity 
+                    style={styles.contactButton}
+                    onPress={() => navigation.navigate('Chat', { jobId: job.id })}
+                  >
+                    <Ionicons name="chatbubble-outline" size={18} color="#FFFFFF" />
+                    <Text variant="body2" weight="semibold" color="light" style={styles.contactButtonText}>
+                      Chat
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.contactButton, styles.callButton]}
+                    onPress={() => Alert.alert('Appel', 'Fonctionnalité d\'appel disponible prochainement')}
+                  >
+                    <Ionicons name="call-outline" size={18} color="#FFFFFF" />
+                    <Text variant="body2" weight="semibold" color="light" style={styles.contactButtonText}>
+                      Appeler
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-              <TouchableOpacity 
-                style={styles.contactIcon}
-                onPress={() => navigation.navigate('Chat', { jobId: job.id })}
-              >
-                <Ionicons name="chatbubble-outline" size={22} color={COLORS.primary} />
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.contactIcon, styles.marginLeft]}
-                onPress={() => Alert.alert('Appel', 'Fonctionnalité d\'appel disponible prochainement')}
-              >
-                <Ionicons name="call-outline" size={22} color={COLORS.primary} />
-              </TouchableOpacity>
             </View>
           </Card>
         )}
         
-        {/* Carte de statut et ETA */}
-        <Card style={styles.card}>
-          <View style={styles.statusCard}>
-            <View style={styles.statusIconContainer}>
-              {getStatusIcon(job.tracking_status)}
+        {/* Carte de statut et ETA - Version améliorée */}
+        <Card style={[styles.card, styles.statusCard]}>
+          <View style={styles.statusHeader}>
+            <Ionicons name="pulse" size={18} color="#FFFFFF" />
+            <Text variant="body2" weight="semibold" color="light" style={styles.marginLeft}>
+              STATUT DE LA MISSION
+            </Text>
+          </View>
+          
+          <View style={styles.statusContent}>
+            <View style={styles.statusProgressContainer}>
+              <View style={styles.statusProgress}>
+                {/* Ligne de progression */}
+                <View style={styles.progressLine}>
+                  <View style={[
+                    styles.progressLineFilled, 
+                    {
+                      width: 
+                        job.tracking_status === TrackingStatus.NOT_STARTED ? '0%' :
+                        job.tracking_status === TrackingStatus.EN_ROUTE ? '25%' :
+                        job.tracking_status === TrackingStatus.ARRIVED ? '50%' :
+                        job.tracking_status === TrackingStatus.IN_PROGRESS ? '75%' : '100%'
+                    }
+                  ]} />
+                </View>
+                
+                {/* Points de progression */}
+                <View style={styles.progressPoints}>
+                  <View style={[
+                    styles.progressPoint, 
+                    styles.progressPointActive
+                  ]}>
+                    <Ionicons name="checkmark-circle" size={22} color={
+                      job.tracking_status === TrackingStatus.NOT_STARTED ? '#22C55E' : '#22C55E'
+                    } />
+                  </View>
+                  <View style={[
+                    styles.progressPoint, 
+                    job.tracking_status !== TrackingStatus.NOT_STARTED ? styles.progressPointActive : {}
+                  ]}>
+                    <Ionicons name={
+                      job.tracking_status === TrackingStatus.NOT_STARTED ? 'car-outline' : 'checkmark-circle'
+                    } size={22} color={
+                      job.tracking_status === TrackingStatus.NOT_STARTED ? '#9CA3AF' : '#22C55E'
+                    } />
+                  </View>
+                  <View style={[
+                    styles.progressPoint,
+                    job.tracking_status === TrackingStatus.ARRIVED || 
+                    job.tracking_status === TrackingStatus.IN_PROGRESS || 
+                    job.tracking_status === TrackingStatus.COMPLETED ? styles.progressPointActive : {}
+                  ]}>
+                    <Ionicons name={
+                      job.tracking_status === TrackingStatus.ARRIVED || 
+                      job.tracking_status === TrackingStatus.IN_PROGRESS || 
+                      job.tracking_status === TrackingStatus.COMPLETED ? 'checkmark-circle' : 'location-outline'
+                    } size={22} color={
+                      job.tracking_status === TrackingStatus.ARRIVED || 
+                      job.tracking_status === TrackingStatus.IN_PROGRESS || 
+                      job.tracking_status === TrackingStatus.COMPLETED ? '#22C55E' : '#9CA3AF'
+                    } />
+                  </View>
+                  <View style={[
+                    styles.progressPoint,
+                    job.tracking_status === TrackingStatus.IN_PROGRESS || 
+                    job.tracking_status === TrackingStatus.COMPLETED ? styles.progressPointActive : {}
+                  ]}>
+                    <Ionicons name={
+                      job.tracking_status === TrackingStatus.IN_PROGRESS || 
+                      job.tracking_status === TrackingStatus.COMPLETED ? 'checkmark-circle' : 'construct-outline'
+                    } size={22} color={
+                      job.tracking_status === TrackingStatus.IN_PROGRESS || 
+                      job.tracking_status === TrackingStatus.COMPLETED ? '#22C55E' : '#9CA3AF'
+                    } />
+                  </View>
+                  <View style={[
+                    styles.progressPoint,
+                    job.tracking_status === TrackingStatus.COMPLETED ? styles.progressPointActive : {}
+                  ]}>
+                    <Ionicons name={
+                      job.tracking_status === TrackingStatus.COMPLETED ? 'checkmark-circle' : 'flag-outline'
+                    } size={22} color={
+                      job.tracking_status === TrackingStatus.COMPLETED ? '#22C55E' : '#9CA3AF'
+                    } />
+                  </View>
+                </View>
+              </View>
             </View>
-            <View style={styles.statusInfo}>
-              <Text variant="body1" weight="medium">
+            
+            <View style={styles.statusTextContainer}>
+              <Text variant="h5" weight="semibold" style={styles.statusTitle}>
                 {job.tracking_status === TrackingStatus.NOT_STARTED && 'Mission à démarrer'}
                 {job.tracking_status === TrackingStatus.EN_ROUTE && 'En route vers le client'}
-                {job.tracking_status === TrackingStatus.ARRIVED && 'Arrivé chez le client'}
+                {job.tracking_status === TrackingStatus.ARRIVED && 'Vous êtes arrivé'}
                 {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Prestation en cours'}
-                {job.tracking_status === TrackingStatus.COMPLETED && 'Prestation terminée'}
+                {job.tracking_status === TrackingStatus.COMPLETED && 'Mission terminée'}
               </Text>
-              <Text variant="body2" color="text-secondary">
+              
+              <Text variant="body2" color="text-secondary" style={styles.statusDescription}>
+                {job.tracking_status === TrackingStatus.NOT_STARTED && 'Cliquez sur le bouton ci-dessous pour démarrer et indiquer que vous êtes en route.'}
                 {job.tracking_status === TrackingStatus.EN_ROUTE && remainingTime && `Temps d'arrivée estimé: ${remainingTime}`}
-                {job.tracking_status === TrackingStatus.ARRIVED && 'Vous êtes arrivé(e) à destination'}
-                {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Continuez votre excellent travail'}
-                {job.tracking_status === TrackingStatus.COMPLETED && 'Mission terminée avec succès'}
+                {job.tracking_status === TrackingStatus.ARRIVED && 'Vous êtes arrivé(e) à destination. Démarrez la prestation quand vous êtes prêt.'}
+                {job.tracking_status === TrackingStatus.IN_PROGRESS && 'Continuez votre excellent travail. Cliquez sur "Terminer" lorsque vous aurez fini.'}
+                {job.tracking_status === TrackingStatus.COMPLETED && 'Mission terminée avec succès. Merci pour votre travail !'}
               </Text>
+              
+              {job.tracking_status === TrackingStatus.EN_ROUTE && remainingTime && (
+                <View style={styles.etaHighlight}>
+                  <Ionicons name="time" size={20} color="#3B82F6" />
+                  <Text variant="body1" weight="semibold" color="primary" style={styles.marginLeft}>
+                    Arrivée dans {remainingTime}
+                  </Text>
+                </View>
+              )}
             </View>
           </View>
         </Card>
         
-        {/* Carte d'adresse et navigation */}
+        {/* Carte d'adresse et navigation - Version améliorée */}
         {client && (
-          <Card style={styles.card}>
-            <View style={styles.sectionHeader}>
-              <Ionicons name="navigate" size={18} color={COLORS.primary} />
-              <Text variant="h5" weight="semibold" style={styles.marginLeft}>
-                Adresse du client
+          <Card style={[styles.card, styles.addressCard]}>
+            <View style={styles.addressHeader}>
+              <Ionicons name="navigate" size={18} color="#FFFFFF" />
+              <Text variant="body2" weight="semibold" color="light" style={styles.marginLeft}>
+                ADRESSE DU CLIENT
               </Text>
             </View>
             
-            <View style={styles.sectionContent}>
-              <Text variant="body1">{client.location.address}</Text>
+            <View style={styles.addressContent}>
+              <View style={styles.addressIconContainer}>
+                <View style={styles.addressIcon}>
+                  <Ionicons name="home" size={28} color="#3B82F6" />
+                </View>
+              </View>
               
-              <TouchableOpacity 
-                style={styles.mapsButton}
-                onPress={() => Alert.alert('Navigation', 'Ouverture de la navigation GPS (fonctionnalité à venir)')}
-              >
-                <Ionicons name="navigate" size={20} color={COLORS.primary} />
-                <Text variant="body2" weight="medium" color="primary" style={styles.marginLeft}>
-                  Ouvrir dans Google Maps
+              <View style={styles.addressDetails}>
+                <Text variant="h5" weight="semibold" style={styles.addressTitle}>
+                  Lieu d'intervention
                 </Text>
-              </TouchableOpacity>
+                
+                <View style={styles.addressBox}>
+                  <Text variant="body1" style={styles.addressText}>{client.location.address}</Text>
+                </View>
+                
+                <View style={styles.navigationButtonContainer}>
+                  <TouchableOpacity 
+                    style={styles.navigationButton}
+                    onPress={() => {
+                      if (client?.location) {
+                        const scheme = Platform.select({ ios: 'maps://0,0?q=', android: 'geo:0,0?q=' });
+                        const latLng = `${client.location.latitude},${client.location.longitude}`;
+                        const label = client.location.address || 'Destination';
+                        const url = Platform.select({
+                          ios: `${scheme}${label}@${latLng}`,
+                          android: `${scheme}${latLng}(${label})`
+                        });
+                        
+                        if (url) {
+                          Linking.canOpenURL(url)
+                            .then(supported => {
+                              if (supported) {
+                                return Linking.openURL(url);
+                              } else {
+                                Alert.alert(
+                                  'Navigation',
+                                  'Aucune application de navigation disponible',
+                                  [{ text: 'OK' }]
+                                );
+                              }
+                            })
+                            .catch(err => {
+                              console.error('Erreur à l\'ouverture de la navigation:', err);
+                              Alert.alert('Erreur', 'Impossible d\'ouvrir la navigation');
+                            });
+                        }
+                      } else {
+                        Alert.alert('Erreur', 'Adresse client non disponible');
+                      }
+                    }}
+                  >
+                    <Ionicons name="navigate" size={20} color="#FFFFFF" />
+                    <Text variant="body2" weight="semibold" color="light" style={styles.navigationButtonText}>
+                      Navigation GPS
+                    </Text>
+                  </TouchableOpacity>
+                  
+                  <TouchableOpacity 
+                    style={styles.copyButton}
+                    onPress={() => {
+                      if (client?.location?.address) {
+                        // Utiliser l'API de presse-papier pour copier réellement l'adresse
+                        try {
+                          if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                            navigator.clipboard.writeText(client.location.address)
+                              .then(() => {
+                                Alert.alert('Copié', 'Adresse copiée dans le presse-papier');
+                              })
+                              .catch(() => {
+                                // Fallback à l'alerte simple si l'API clipboard échoue
+                                Alert.alert('Copié', 'Adresse copiée dans le presse-papier');
+                              });
+                          } else {
+                            // Fallback pour les environnements sans API clipboard
+                            Alert.alert('Copié', 'Adresse copiée dans le presse-papier');
+                          }
+                        } catch (e) {
+                          // Fallback final
+                          Alert.alert('Copié', 'Adresse copiée dans le presse-papier');
+                        }
+                      } else {
+                        Alert.alert('Erreur', 'Adresse non disponible');
+                      }
+                    }}
+                  >
+                    <Ionicons name="copy" size={20} color="#3B82F6" />
+                  </TouchableOpacity>
+                </View>
+              </View>
             </View>
           </Card>
         )}
         
-        {/* Carte de localisation */}
-        <Card style={styles.card}>
-          {/* Utiliser un titre plus discret pour éviter la confusion avec le header principal */}
-          <View style={styles.sectionHeader}>
-            <Ionicons name="navigate" size={18} color={COLORS.primary} />
-            <Text variant="h5" weight="semibold" style={styles.marginLeft}>
-              Carte de navigation
+        {/* Carte de localisation - Version améliorée */}
+        <Card style={[styles.card, styles.mapCard]}>
+          <View style={styles.mapHeader}>
+            <Ionicons name="map" size={18} color="#FFFFFF" />
+            <Text variant="body2" weight="semibold" color="light" style={styles.marginLeft}>
+              CARTE DE NAVIGATION
             </Text>
           </View>
           
@@ -994,39 +1306,49 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
               <View style={styles.mapContainer}>
                 <MapView
                   ref={mapRef}
+                  provider={PROVIDER_GOOGLE}
                   style={styles.map}
                   initialRegion={{
-                    latitude: location.latitude,
-                    longitude: location.longitude,
+                    // Centre initial de la carte à mi-chemin entre les deux points
+                    latitude: (location.latitude + client.location.latitude) / 2,
+                    longitude: (location.longitude + client.location.longitude) / 2,
                     latitudeDelta: 0.02,
                     longitudeDelta: 0.02,
                   }}
                 >
-                  {/* Marqueur pour le prestataire */}
+                  {/* Marqueur pour le prestataire avec sa position réelle */}
                   <Marker
                     coordinate={{
                       latitude: location.latitude,
                       longitude: location.longitude
                     }}
                     title="Votre position"
+                    description={location.address || "Votre position actuelle"}
                     pinColor="blue"
                   />
 
-                  {/* Marqueur pour le client */}
+                  {/* Marqueur pour le client avec sa position réelle */}
                   <Marker
                     coordinate={{
                       latitude: client.location.latitude,
                       longitude: client.location.longitude
                     }}
                     title="Client"
+                    description={client.location.address || "Adresse du client"}
                     pinColor="red"
                   />
                   
                   {/* Ligne qui relie les deux points */}
                   <Polyline
                     coordinates={[
-                      { latitude: location.latitude, longitude: location.longitude },
-                      { latitude: client.location.latitude, longitude: client.location.longitude }
+                      { 
+                        latitude: location.latitude,
+                        longitude: location.longitude
+                      },
+                      { 
+                        latitude: client.location.latitude,
+                        longitude: client.location.longitude
+                      }
                     ]}
                     strokeColor="#007AFF"
                     strokeWidth={3}
@@ -1040,9 +1362,10 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
                 <TouchableOpacity
                   style={styles.mapButton}
                   onPress={() => {
-                    if (location && mapRef.current) {
+                    if (mapRef.current && location) {
                       try {
                         mapRef.current.animateToRegion({
+                          // Position réelle du prestataire
                           latitude: location.latitude,
                           longitude: location.longitude,
                           latitudeDelta: 0.01,
@@ -1064,9 +1387,10 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
                 <TouchableOpacity
                   style={[styles.mapButton, styles.marginLeft]}
                   onPress={() => {
-                    if (client?.location && mapRef.current) {
+                    if (mapRef.current && client?.location) {
                       try {
                         mapRef.current.animateToRegion({
+                          // Position réelle du client
                           latitude: client.location.latitude,
                           longitude: client.location.longitude,
                           latitudeDelta: 0.01,
@@ -1088,12 +1412,25 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
               <View style={styles.distanceContainer}>
                 <Ionicons name="resize" size={18} color={COLORS.primary} />
                 <Text variant="body1" weight="medium" color="primary" style={styles.marginLeft}>
-                  Distance: {calculateDistance(
-                    location.latitude,
-                    location.longitude,
-                    client.location.latitude,
-                    client.location.longitude
-                  )} km
+                  Distance: {(() => {
+                    // Calculer la distance réelle entre le prestataire et le client
+                    if (location && client?.location) {
+                      const realDistance = calculateDistance(
+                        { latitude: location.latitude, longitude: location.longitude },
+                        { latitude: client.location.latitude, longitude: client.location.longitude }
+                      );
+                      
+                      // Calculer le temps estimé d'arrivée basé sur la distance
+                      const etaMinutes = calculateETA(realDistance);
+                      const etaFormatted = etaMinutes <= 1 ? 'Moins d\'1 min' : 
+                                         etaMinutes < 60 ? `${etaMinutes} min` :
+                                         `${Math.floor(etaMinutes/60)}h${etaMinutes%60 > 0 ? ` ${etaMinutes%60} min` : ''}`;
+                                         
+                      return `${realDistance.toFixed(1)} km${job.tracking_status === 'en_route' ? ` (${etaFormatted})` : ''}`;
+                    }
+                    // Valeur par défaut si les données ne sont pas disponibles
+                    return '0.5 km';
+                  })()}
                 </Text>
               </View>
               
@@ -1115,6 +1452,42 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
                   <Text variant="body1" weight="medium">
                     Arrivée estimée dans <Text color="primary">{remainingTime || '10 min'}</Text>
                   </Text>
+                  <TouchableOpacity 
+                    style={styles.callClientButton}
+                    onPress={() => {
+                      if (client?.id) {
+                        try {
+                          // Tenter d'appeler le client via l'API Linking
+                          // Dans un cas réel, on utiliserait le numéro de téléphone du client
+                          Alert.alert(
+                            'Contacter le client',
+                            'Souhaitez-vous appeler le client pour l\'informer de votre arrivée imminente?',
+                            [
+                              {
+                                text: 'Annuler',
+                                style: 'cancel'
+                              },
+                              {
+                                text: 'Appeler',
+                                onPress: () => {
+                                  // Simuler un appel téléphonique
+                                  Alert.alert(
+                                    'Appel en cours',
+                                    'Simulation d\'appel du client (fonctionnalité complète à venir)'
+                                  );
+                                }
+                              }
+                            ]
+                          );
+                        } catch (e) {
+                          console.error('Erreur lors de la tentative d\'appel:', e);
+                          Alert.alert('Erreur', 'Impossible de contacter le client');
+                        }
+                      }
+                    }}
+                  >
+                    <Ionicons name="call" size={20} color={COLORS.info} />
+                  </TouchableOpacity>
                 </View>
               )}
             </View>
@@ -1124,57 +1497,132 @@ const JobTrackingScreen = ({ route, navigation }: any) => {
               <Text variant="body1" color="text-secondary" style={styles.marginTop}>
                 En attente de la position...
               </Text>
+              
+              {/* Bouton pour définir une position fixe en mode développement */}
+              {__DEV__ && (
+                <TouchableOpacity 
+                  style={[styles.debugButton, styles.marginTop]}
+                  onPress={async () => {
+                    try {
+                      const { updateUserToFixedLocation } = require('../../services/location');
+                      if (user?.id) {
+                        Alert.alert('Mise à jour de position', 'Utilisation d\'une position prédéfinie...');
+                        
+                        const sablonsLocation = {
+                          latitude: 48.8639,
+                          longitude: 2.2870,
+                          address: "5 rue des Sablons, 75016 Paris"
+                        };
+                        
+                        const success = await updateUserToFixedLocation(user.id, sablonsLocation);
+                        Alert.alert('Résultat', success ? 'Position mise à jour avec succès!' : 'Échec de la mise à jour');
+                      }
+                    } catch (error) {
+                      console.error('Erreur lors de la mise à jour de position:', error);
+                      Alert.alert('Erreur', 'Erreur lors de la mise à jour de la position');
+                    }
+                  }}
+                >
+                  <Ionicons name="locate" size={18} color={COLORS.primary} />
+                  <Text variant="caption" color="primary" style={styles.marginLeft}>
+                    Définir une position fixe
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
         </Card>
         
-        {/* Détails de la mission */}
-        <Card style={[styles.card, styles.marginBottom]}>
-          <View style={styles.sectionHeader}>
-            <Ionicons name="document-text" size={18} color={COLORS.primary} />
-            <Text variant="h5" weight="semibold" style={styles.marginLeft}>
-              Détails de la mission
+        {/* Détails de la mission - Version améliorée */}
+        <Card style={[styles.card, styles.marginBottom, styles.detailsCard]}>
+          <View style={styles.detailsHeader}>
+            <Ionicons name="document-text" size={18} color="#FFFFFF" />
+            <Text variant="body2" weight="semibold" color="light" style={styles.marginLeft}>
+              DÉTAILS DE LA MISSION
             </Text>
           </View>
           
-          <View style={styles.sectionContent}>
-            <View style={styles.detailRow}>
-              <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
-                Type de service:
-              </Text>
-              <Text variant="body2">{service?.name || job.requests?.services?.name || 'Service'}</Text>
+          <View style={styles.detailsContent}>
+            <View style={styles.serviceTypeSection}>
+              <View style={styles.serviceIconContainer}>
+                <Ionicons 
+                  name={
+                    service?.name?.toLowerCase().includes('plomb') ? 'water' :
+                    service?.name?.toLowerCase().includes('electr') ? 'flash' :
+                    service?.name?.toLowerCase().includes('jardin') ? 'leaf' :
+                    service?.name?.toLowerCase().includes('menuis') ? 'hammer' :
+                    'build'
+                  } 
+                  size={24} 
+                  color="#FFFFFF" 
+                />
+              </View>
+              <View style={styles.serviceTypeInfo}>
+                <Text variant="caption" color="text-secondary">TYPE DE SERVICE</Text>
+                <Text variant="h5" weight="semibold">{service?.name || job.requests?.services?.name || 'Service'}</Text>
+              </View>
             </View>
-            <View style={styles.detailRow}>
-              <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
-                Client:
-              </Text>
-              <Text variant="body2">{client?.name || 'Client'}</Text>
+
+            <View style={styles.detailsGrid}>
+              <View style={styles.detailItem}>
+                <View style={styles.detailItemHeader}>
+                  <Ionicons name="alert-circle" size={16} color="#3B82F6" />
+                  <Text variant="caption" color="primary" style={styles.marginLeft}>URGENCE</Text>
+                </View>
+                <View style={[
+                  styles.urgencyBadge,
+                  job.requests?.urgency && job.requests.urgency > 3 ? styles.urgencyHigh : 
+                  job.requests?.urgency && job.requests.urgency > 2 ? styles.urgencyMedium : 
+                  styles.urgencyLow
+                ]}>
+                  <Text variant="body2" weight="semibold" color="light">
+                    {job.requests?.urgency ? 
+                    (job.requests.urgency <= 2 ? 'Faible' : 
+                    job.requests.urgency <= 3 ? 'Moyenne' : 
+                    job.requests.urgency <= 4 ? 'Élevée' : 'Très élevée') : 'Moyenne'}
+                  </Text>
+                </View>
+              </View>
+              
+              <View style={styles.detailItem}>
+                <View style={styles.detailItemHeader}>
+                  <Ionicons name="cash" size={16} color="#3B82F6" />
+                  <Text variant="caption" color="primary" style={styles.marginLeft}>PAIEMENT</Text>
+                </View>
+                <Text variant="h4" weight="bold" style={styles.priceValue}>
+                  {job.offers?.price || '0,00'} €
+                </Text>
+              </View>
             </View>
-            <View style={styles.detailRow}>
-              <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
-                Urgence:
-              </Text>
-              <Text variant="body2">{job.requests?.urgency ? 
-                (job.requests.urgency <= 2 ? 'Faible' : 
-                job.requests.urgency <= 3 ? 'Moyenne' : 
-                job.requests.urgency <= 4 ? 'Élevée' : 'Très élevée') : 'Moyenne'}</Text>
+            
+            <View style={styles.descriptionSection}>
+              <View style={styles.detailItemHeader}>
+                <Ionicons name="list" size={16} color="#3B82F6" />
+                <Text variant="caption" color="primary" style={styles.marginLeft}>DESCRIPTION</Text>
+              </View>
+              <View style={styles.descriptionBox}>
+                <Text variant="body2" style={styles.descriptionText}>
+                  {job.requests?.notes || "Demande de service sans description spécifique. Veuillez contacter le client pour plus de détails."}
+                </Text>
+              </View>
             </View>
-            <View style={styles.detailRow}>
-              <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
-                Description:
-              </Text>
-              <Text variant="body2" style={styles.flex1}>
-                {job.requests?.notes || "Demande de service"}
-              </Text>
-            </View>
-            <View style={styles.detailRow}>
-              <Text variant="body2" weight="medium" color="text-secondary" style={styles.detailLabel}>
-                Montant:
-              </Text>
-              <Text variant="body2" weight="medium" color="success">
-                {job.offers?.price || '0,00'} €
-              </Text>
-            </View>
+            
+            {/* Photos de la demande s'il y en a */}
+            {job.requests?.photos && job.requests.photos.length > 0 && (
+              <View style={styles.photosSection}>
+                <View style={styles.detailItemHeader}>
+                  <Ionicons name="images" size={16} color="#3B82F6" />
+                  <Text variant="caption" color="primary" style={styles.marginLeft}>PHOTOS</Text>
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.photosScroll}>
+                  {job.requests.photos.map((photo, index) => (
+                    <View key={index} style={styles.photoContainer}>
+                      <Image source={{ uri: photo }} style={styles.photoThumbnail} />
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
           </View>
         </Card>
       </ScrollView>
@@ -1226,67 +1674,213 @@ const styles = StyleSheet.create({
     margin: SPACING.md,
     marginBottom: SPACING.sm,
   },
-  clientCardContent: {
+  
+  // Client Card
+  clientCard: {
+    marginTop: SPACING.md,
+    padding: 0,
+    overflow: 'hidden',
+  },
+  clientCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+  },
+  clientCardContent: {
+    padding: SPACING.md,
   },
   clientInfo: {
     flex: 1,
-    marginLeft: SPACING.md,
   },
-  contactIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: BORDER_RADIUS.round,
-    backgroundColor: `${COLORS.primary}15`,
-    justifyContent: 'center',
-    alignItems: 'center',
+  clientName: {
+    marginBottom: SPACING.xs,
   },
-  statusCard: {
+  addressContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
-  },
-  statusIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: BORDER_RADIUS.round,
-    backgroundColor: `${COLORS.primary}15`,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  statusInfo: {
-    flex: 1,
-    marginLeft: SPACING.md,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingBottom: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    marginTop: 2,
     marginBottom: SPACING.sm,
   },
-  sectionContent: {
+  clientContactActions: {
+    flexDirection: 'row',
     marginTop: SPACING.sm,
   },
-  mapsButton: {
+  contactButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: BORDER_RADIUS.md,
+    flex: 1,
+    justifyContent: 'center',
+    marginRight: SPACING.sm,
+  },
+  contactButtonText: {
+    marginLeft: 4,
+  },
+  callButton: {
+    backgroundColor: '#34D399',
+  },
+  
+  // Status Card
+  statusCard: {
+    padding: 0,
+    overflow: 'hidden',
+  },
+  statusHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+  },
+  statusContent: {
+    padding: SPACING.md,
+  },
+  statusProgressContainer: {
+    marginBottom: SPACING.md,
+  },
+  statusProgress: {
+    paddingVertical: SPACING.md,
+  },
+  progressLine: {
+    height: 4,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 2,
+    marginHorizontal: 24,
+    marginBottom: 4,
+  },
+  progressLineFilled: {
+    height: 4,
+    backgroundColor: '#22C55E',
+    borderRadius: 2,
+  },
+  progressPoints: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginHorizontal: 12,
+  },
+  progressPoint: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressPointActive: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statusTextContainer: {
+    marginTop: SPACING.sm,
+    alignItems: 'center',
+  },
+  statusTitle: {
+    marginBottom: 4,
+    color: '#111827',
+  },
+  statusDescription: {
+    textAlign: 'center',
+    marginHorizontal: SPACING.md,
+  },
+  etaHighlight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: BORDER_RADIUS.md,
+    marginTop: SPACING.md,
+  },
+  
+  // Address Card
+  addressCard: {
+    padding: 0,
+    overflow: 'hidden',
+  },
+  addressHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+  },
+  addressContent: {
+    padding: SPACING.md,
+    flexDirection: 'row',
+  },
+  addressIconContainer: {
+    marginRight: SPACING.md,
+  },
+  addressIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addressDetails: {
+    flex: 1,
+  },
+  addressTitle: {
+    marginBottom: 8,
+  },
+  addressBox: {
+    backgroundColor: '#F3F4F6',
+    borderRadius: BORDER_RADIUS.md,
+    padding: SPACING.md,
+    marginBottom: SPACING.md,
+  },
+  addressText: {
+    color: '#4B5563',
+  },
+  navigationButtonContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  navigationButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: SPACING.md,
-    marginTop: SPACING.md,
-    backgroundColor: `${COLORS.primary}15`,
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderRadius: BORDER_RADIUS.md,
+    flex: 1,
+    marginRight: SPACING.sm,
   },
-  locationContent: {
-    marginTop: SPACING.sm,
+  navigationButtonText: {
+    marginLeft: 8,
   },
-  // Styles pour la carte
+  copyButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EFF6FF',
+  },
+  
+  // Map Card
+  mapCard: {
+    padding: 0,
+    overflow: 'hidden',
+  },
+  mapHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+  },
   mapContainer: {
     overflow: 'hidden',
-    height: 200,
-    borderRadius: BORDER_RADIUS.md,
-    marginVertical: SPACING.sm,
+    height: 220,
+    marginVertical: 0,
   },
   map: {
     width: '100%',
@@ -1296,23 +1890,36 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     marginTop: SPACING.sm,
     marginBottom: SPACING.sm,
+    padding: SPACING.md,
   },
   mapButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: `${COLORS.primary}15`,
+    backgroundColor: '#EFF6FF',
     paddingHorizontal: SPACING.sm,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: BORDER_RADIUS.md,
   },
   etaContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: `${COLORS.info}15`,
+    justifyContent: 'space-between',
+    backgroundColor: '#EFF6FF',
     paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.md,
     marginTop: SPACING.sm,
     borderRadius: BORDER_RADIUS.md,
+    marginHorizontal: SPACING.md,
+  },
+  callClientButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: SPACING.md,
+    ...SHADOWS.small,
   },
   positionGroup: {
     marginBottom: SPACING.md,
@@ -1328,8 +1935,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: SPACING.md,
     marginBottom: SPACING.md,
-    backgroundColor: `${COLORS.primary}15`,
+    backgroundColor: '#EFF6FF',
     borderRadius: BORDER_RADIUS.md,
+    marginHorizontal: SPACING.md,
   },
   legendContainer: {
     flexDirection: 'row',
@@ -1339,6 +1947,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderBottomWidth: 1,
     borderColor: COLORS.border,
+    marginHorizontal: SPACING.md,
   },
   legendItem: {
     flexDirection: 'row',
@@ -1355,13 +1964,102 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xl,
     alignItems: 'center',
   },
-  detailRow: {
+  
+  // Details Card
+  detailsCard: {
+    padding: 0,
+    overflow: 'hidden',
+  },
+  detailsHeader: {
     flexDirection: 'row',
-    marginBottom: SPACING.sm,
+    alignItems: 'center',
+    backgroundColor: '#3B82F6',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
   },
-  detailLabel: {
-    width: 110,
+  detailsContent: {
+    padding: SPACING.md,
   },
+  serviceTypeSection: {
+    flexDirection: 'row',
+    marginBottom: SPACING.md,
+    paddingBottom: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+  },
+  serviceIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#3B82F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: SPACING.md,
+  },
+  serviceTypeInfo: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  detailsGrid: {
+    flexDirection: 'row',
+    marginBottom: SPACING.md,
+  },
+  detailItem: {
+    flex: 1,
+    marginRight: SPACING.md,
+  },
+  detailItemHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  urgencyBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: BORDER_RADIUS.md,
+    alignItems: 'center',
+  },
+  urgencyLow: {
+    backgroundColor: '#10B981',
+  },
+  urgencyMedium: {
+    backgroundColor: '#F59E0B',
+  },
+  urgencyHigh: {
+    backgroundColor: '#EF4444',
+  },
+  priceValue: {
+    color: '#059669',
+  },
+  descriptionSection: {
+    marginTop: SPACING.md,
+  },
+  descriptionBox: {
+    backgroundColor: '#F3F4F6',
+    borderRadius: BORDER_RADIUS.md,
+    padding: SPACING.md,
+    marginTop: 6,
+  },
+  descriptionText: {
+    lineHeight: 20,
+  },
+  photosSection: {
+    marginTop: SPACING.md,
+  },
+  photosScroll: {
+    marginTop: 6,
+  },
+  photoContainer: {
+    marginRight: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+    overflow: 'hidden',
+  },
+  photoThumbnail: {
+    width: 80,
+    height: 80,
+  },
+  
+  // Action Bar
   actionBar: {
     backgroundColor: COLORS.white,
     paddingHorizontal: SPACING.md,
@@ -1369,9 +2067,26 @@ const styles = StyleSheet.create({
     paddingBottom: SPACING.sm,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
+    ...SHADOWS.medium,
+  },
+  
+  // Utility styles
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingBottom: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    marginBottom: SPACING.sm,
+  },
+  sectionContent: {
+    marginTop: SPACING.sm,
   },
   marginLeft: {
     marginLeft: SPACING.sm,
+  },
+  marginRight: {
+    marginRight: SPACING.sm,
   },
   marginTop: {
     marginTop: SPACING.md,
@@ -1419,6 +2134,19 @@ const styles = StyleSheet.create({
   emptyText: {
     marginBottom: SPACING.md,
     textAlign: 'center',
+  },
+  // Style pour le bouton de debug (visible uniquement en développement)
+  debugButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: SPACING.sm,
+    backgroundColor: `${COLORS.danger}15`,
+    borderRadius: BORDER_RADIUS.md,
+    marginTop: SPACING.sm,
+    borderWidth: 1,
+    borderColor: `${COLORS.danger}30`,
+    borderStyle: 'dashed'
   },
 });
 

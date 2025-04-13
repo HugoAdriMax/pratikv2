@@ -11,12 +11,12 @@ import {
 } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
 import supabase from '../../config/supabase';
-import { Job, TrackingStatus } from '../../types';
+import { Job, TrackingStatus, PaymentStatus } from '../../types';
 import { COLORS, SHADOWS, SPACING, BORDER_RADIUS } from '../../utils/theme';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Text, Badge, Card } from '../../components/ui';
-import { getServiceById, getClientById, enrichJobWithMockData } from '../../utils/mockData';
+import { Text, Badge, Card, Button } from '../../components/ui';
+import { getServiceById, getClientById } from '../../services/api';
 
 const MyJobsScreen = ({ navigation }: any) => {
   const [activeJobs, setActiveJobs] = useState<Job[]>([]);
@@ -46,6 +46,7 @@ const MyJobsScreen = ({ navigation }: any) => {
             id, 
             price, 
             status, 
+            payment_status,
             request_id,
             requests:request_id (
               id,
@@ -70,106 +71,36 @@ const MyJobsScreen = ({ navigation }: any) => {
         throw error;
       }
       
-      // Séparer les missions actives et terminées
-      const active: Job[] = [];
-      const completed: Job[] = [];
-      
       // Vérifier si des données ont été récupérées
       if (!data || data.length === 0) {
-        console.log('Aucun job trouvé - utilisation de données simulées pour les tests');
-        
-        // Créer des jobs fictifs pour les tests, y compris un job pour chaque offre acceptée
-        const mockJobs = [];
-        
-        // Récupérer toutes les offres, en priorité les offres acceptées
-        try {
-          // Connexion à Supabase pour vérification
-          const status = await supabase.auth.getSession();
-          console.log('Statut de la connexion Supabase:', status.data.session ? 'Connecté' : 'Non connecté');
-          
-          // 1. D'abord, vérifier s'il y a des offres acceptées
-          const { data: acceptedOffers, error: offerError } = await supabase
-            .from('offers')
-            .select('*, requests:request_id(*)')
-            .eq('prestataire_id', user.id)
-            .eq('status', 'accepted');
-            
-          if (offerError) {
-            console.error('Erreur lors de la récupération des offres acceptées:', offerError);
-          } else {
-            console.log(`[CRITIQUE] Offres acceptées trouvées pour ce prestataire: ${acceptedOffers?.length || 0}`);
-            
-            // Pour chaque offre acceptée, créer un job simulé
-            if (acceptedOffers && acceptedOffers.length > 0) {
-              console.log('Détails des offres acceptées:');
-              acceptedOffers.forEach((offer, index) => {
-                console.log(`Offre ${index+1}: ID=${offer.id}, Request=${offer.request_id}, Prix=${offer.price}`);
-                
-                // Créer un job pour cette offre
-                mockJobs.push({
-                  id: `auto-job-${index}`,
-                  offer_id: offer.id,
-                  client_id: offer.requests?.client_id || 'auto-client',
-                  prestataire_id: user.id,
-                  tracking_status: 'not_started',
-                  is_completed: false,
-                  created_at: offer.created_at || new Date().toISOString()
-                });
-              });
-            }
-          }
-        } catch (error) {
-          console.error('Exception lors de la récupération des offres acceptées:', error);
-        }
-        
-        // Si aucune offre acceptée n'a été trouvée, ajouter quelques jobs fictifs de base
-        if (mockJobs.length === 0) {
-          console.log('Aucune offre acceptée trouvée, ajout de jobs fictifs de démonstration');
-          
-          // Job standard pour les tests
-          mockJobs.push({
-            id: 'mock-job-1',
-            offer_id: 'mock-offer-1',
-            client_id: 'client-123',
-            prestataire_id: user.id,
-            tracking_status: 'not_started',
-            is_completed: false,
-            created_at: new Date().toISOString()
-          });
-          
-          // Deuxième mission fictive pour les tests
-          mockJobs.push({
-            id: 'mock-job-2',
-            offer_id: 'mock-offer-2',
-            client_id: 'client-456',
-            prestataire_id: user.id,
-            tracking_status: 'en_route',
-            is_completed: false,
-            created_at: new Date(Date.now() - 86400000).toISOString() // Hier
-          });
-        }
-        
-        // Enrichir les jobs simulés avec des données
-        console.log(`Création de ${mockJobs.length} jobs simulés`);
-        const enrichedJobs = mockJobs.map(job => enrichJobWithMockData(job as Job));
-        setActiveJobs(enrichedJobs);
+        console.log('Aucun job trouvé');
+        // Ne pas créer de données fictives en production
+        setActiveJobs([]);
         setCompletedJobs([]);
+        setLoading(false);
         return;
       }
       
-      // Enrichir les jobs avec des données simulées
-      const enrichedJobs = (data as Job[]).map(job => enrichJobWithMockData(job));
+      // Traiter les jobs directement sans enrichissement externe
+      const processJobs = () => {
+        const active: Job[] = [];
+        const completed: Job[] = [];
+        
+        // Utiliser les données telles quelles
+        (data as Job[]).forEach(job => {
+          if (job.is_completed) {
+            completed.push(job);
+          } else {
+            active.push(job);
+          }
+        });
+        
+        setActiveJobs(active);
+        setCompletedJobs(completed);
+        setLoading(false);
+      };
       
-      enrichedJobs.forEach(job => {
-        if (job.is_completed) {
-          completed.push(job);
-        } else {
-          active.push(job);
-        }
-      });
-      
-      setActiveJobs(active);
-      setCompletedJobs(completed);
+      processJobs();
     } catch (error) {
       console.error('Error fetching jobs:', error);
       Alert.alert('Erreur', 'Impossible de récupérer vos missions');
@@ -213,10 +144,17 @@ const MyJobsScreen = ({ navigation }: any) => {
       })
       .subscribe();
     
+    // Rafraîchissement périodique
+    const refreshInterval = setInterval(() => {
+      loadJobs();
+      console.log('Rafraîchissement automatique des missions...');
+    }, 30000); // Toutes les 30 secondes
+    
     // Nettoyer les abonnements lors du démontage du composant
     return () => {
       unsubscribe();
       supabase.removeChannel(jobsChannel);
+      clearInterval(refreshInterval);
     };
   }, [navigation, user]);
 
@@ -239,23 +177,20 @@ const MyJobsScreen = ({ navigation }: any) => {
   
   const getJobIcon = (job: Job) => {
     // Si le service est disponible, récupérer l'icône du service
-    // Adapter pour la nouvelle structure nested où requests est dans offers
     if (job.offers?.requests?.service_id) {
-      const serviceIcons: Record<string, string> = {
-        '1': 'construct',   // Plomberie
-        '2': 'flash',       // Électricité
-        '3': 'leaf',        // Jardinage
-        '4': 'home',        // Ménage
-        '5': 'hammer',      // Bricolage
-        '6': 'color-palette', // Peinture
-        '7': 'car',         // Déménagement
-      };
+      const serviceName = job.offers.requests.service_id.split('-')[0].toLowerCase();
       
-      // Vérifier si on a une icône pour ce service
-      const serviceId = job.offers.requests.service_id.charAt(0);
-      if (serviceId && !isNaN(parseInt(serviceId)) && parseInt(serviceId) <= 7) {
-        return serviceIcons[serviceId];
-      }
+      // Associer les icônes appropriées basées sur le type de service
+      if (serviceName.includes('plomb')) return 'water';
+      if (serviceName.includes('electr')) return 'flash';
+      if (serviceName.includes('menuis')) return 'construct';
+      if (serviceName.includes('peinture')) return 'color-palette';
+      if (serviceName.includes('jardin')) return 'leaf';
+      if (serviceName.includes('nettoy')) return 'sparkles';
+      if (serviceName.includes('clim')) return 'thermometer';
+      if (serviceName.includes('serr')) return 'key';
+      if (serviceName.includes('demenag')) return 'cube';
+      if (serviceName.includes('informa')) return 'laptop';
     }
     
     // Icône par défaut basée sur le statut de la mission
@@ -276,116 +211,195 @@ const MyJobsScreen = ({ navigation }: any) => {
   };
 
   const renderJobItem = ({ item }: { item: Job }) => {
-    // Formatez la date
+    // Formater la date
     const date = new Date(item.created_at);
     const formattedDate = date.toLocaleDateString('fr-FR', {
       day: '2-digit',
       month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
+      year: '2-digit'
     });
     
     // Récupérer les informations du client
-    let clientName = 'Client';
-    if (item.clients && item.clients.email) {
-      clientName = item.clients.email.split('@')[0] || 'Client';
-    } else {
-      const mockClient = getClientById(item.client_id);
-      clientName = mockClient?.name || 'Client';
-    }
+    const clientName = item.clients?.email?.split('@')[0] || 'Client';
     
     // Récupérer le prix de l'offre
-    // Log pour vérifier les données reçues
-    console.log(`Debug - Données de l'offre:`, item.offers);
+    const price = item.offers?.price?.toString() || '0';
     
-    // S'assurer que le prix est correctement récupéré de l'offre
-    let price = '0';
-    if (item.offers && typeof item.offers.price !== 'undefined') {
-      price = item.offers.price.toString();
-      console.log(`Prix trouvé dans l'offre: ${price}`);
-    }
+    // Récupérer le nom du service
+    const serviceName = item.offers?.requests?.services?.name || 
+                       item.offers?.requests?.service_id?.replace(/-/g, ' ').split(' ')[0].charAt(0).toUpperCase() + 
+                       item.offers?.requests?.service_id?.replace(/-/g, ' ').split(' ')[0].slice(1) || 
+                       'Service';
     
-    // Récupérer le service si disponible
-    let serviceName = '';
-    // Adapter pour la nouvelle structure nested où requests est dans offers
-    if (item.offers?.requests?.service_id) {
-      const service = getServiceById(item.offers.requests.service_id);
-      serviceName = service?.name || '';
-    }
+    const location = item.offers?.requests?.location?.address || 'Adresse non précisée';
     
-    const badgeProps = getStatusBadgeProps(item.tracking_status);
+    const statusBadgeProps = getStatusBadgeProps(item.tracking_status);
     const jobIcon = getJobIcon(item);
     
+    // Vérifier si la mission est payée mais pas encore démarrée
+    const isPaidButNotStarted = 
+      item.tracking_status === TrackingStatus.NOT_STARTED && 
+      item.offers?.payment_status === PaymentStatus.COMPLETED;
+    
+    // Vérifier si la mission est en cours (en route, arrivé ou en progrès)
+    const isInProgress = 
+      item.tracking_status === TrackingStatus.EN_ROUTE || 
+      item.tracking_status === TrackingStatus.ARRIVED || 
+      item.tracking_status === TrackingStatus.IN_PROGRESS;
+    
+    // Vérifier si la mission est terminée
+    const isCompleted = item.tracking_status === TrackingStatus.COMPLETED;
+    
     return (
-      <Card
-        style={styles.jobCard}
-        elevation="sm"
+      <TouchableOpacity
+        activeOpacity={0.9}
         onPress={() => navigation.navigate('JobTracking', { jobId: item.id })}
       >
-        <View style={styles.cardHeader}>
-          <View style={styles.leftContainer}>
-            <View style={styles.iconContainer}>
-              <Ionicons name={jobIcon} size={20} color={COLORS.primary} />
+        <Card 
+          style={[
+            styles.jobCard,
+            isPaidButNotStarted && styles.paidJobCard,
+            isInProgress && styles.inProgressCard,
+            isCompleted && styles.completedCard
+          ]}
+          elevation="sm"
+        >
+          <View style={styles.cardHeader}>
+            {/* Icône et nom du client */}
+            <View style={styles.clientSection}>
+              <View style={[
+                styles.iconContainer,
+                isPaidButNotStarted && styles.paidIconContainer,
+                isInProgress && styles.inProgressIconContainer,
+                isCompleted && styles.completedIconContainer
+              ]}>
+                <Ionicons 
+                  name={jobIcon} 
+                  size={20} 
+                  color="#FFFFFF" 
+                />
+              </View>
+              <Text variant="subtitle1" weight="bold" style={styles.clientName}>
+                {clientName}
+              </Text>
             </View>
-            <View style={styles.clientInfo}>
-              <Text variant="h5" weight="semibold">{clientName}</Text>
-              <Badge 
-                variant={badgeProps.variant as any} 
-                label={badgeProps.label} 
-                size="sm"
-                border
-                style={styles.marginTopXs}
-              />
+            
+            {/* Badge de statut */}
+            <Badge
+              variant={statusBadgeProps.variant as any}
+              label={statusBadgeProps.label}
+              size="sm"
+              border
+            />
+          </View>
+          
+          {/* Indicateur spécial pour missions payées */}
+          {isPaidButNotStarted && (
+            <View style={styles.paidIndicator}>
+              <Ionicons name="wallet" size={14} color={COLORS.success} />
+              <Text variant="caption" weight="medium" color="success" style={styles.indicatorText}>
+                Paiement confirmé - Prêt à démarrer
+              </Text>
+            </View>
+          )}
+          
+          {/* Indicateur pour missions en cours */}
+          {isInProgress && (
+            <View style={styles.progressContainer}>
+              <View style={styles.progressBar}>
+                <View 
+                  style={[
+                    styles.progressFill, 
+                    { 
+                      width: item.tracking_status === TrackingStatus.EN_ROUTE ? '30%' : 
+                             item.tracking_status === TrackingStatus.ARRIVED ? '60%' : '85%'
+                    }
+                  ]} 
+                />
+              </View>
+              <Text variant="caption" color="text-secondary" style={styles.progressLabel}>
+                {item.tracking_status === TrackingStatus.EN_ROUTE ? 'En route vers le client' : 
+                 item.tracking_status === TrackingStatus.ARRIVED ? 'Arrivé chez le client' : 'Travail en cours'}
+              </Text>
+            </View>
+          )}
+          
+          {/* Service et prix */}
+          <View style={styles.infoRow}>
+            <View style={styles.serviceContainer}>
+              <Ionicons name="briefcase" size={14} color={COLORS.primary} />
+              <Text variant="body2" weight="medium" style={styles.serviceText}>
+                {serviceName}
+              </Text>
+            </View>
+            
+            <View style={[
+              styles.priceContainer,
+              isPaidButNotStarted && styles.paidPriceContainer,
+              isInProgress && styles.inProgressPriceContainer,
+              isCompleted && styles.completedPriceContainer
+            ]}>
+              <Text variant="body2" weight="semibold" color="light">
+                {price} €
+              </Text>
             </View>
           </View>
-          <View style={styles.priceContainer}>
-            <Text variant="body1" weight="semibold" color="success">
-              {price} €
-            </Text>
-          </View>
-        </View>
-        
-        <View style={styles.separator} />
-        
-        {serviceName && (
-          <View style={styles.serviceRow}>
-            <Ionicons name="briefcase-outline" size={16} color={COLORS.textSecondary} />
-            <Text 
-              variant="body2" 
-              color="text" 
-              style={styles.marginLeft}
-              weight="medium"
-            >
-              {serviceName}
-            </Text>
-          </View>
-        )}
-        
-        <View style={styles.infoRow}>
-          <View style={styles.dateContainer}>
-            <Ionicons name="calendar-outline" size={16} color={COLORS.textSecondary} />
-            <Text 
-              variant="caption" 
-              color="text-secondary" 
-              style={styles.marginLeft}
-            >
-              {formattedDate}
+          
+          {/* Adresse */}
+          <View style={styles.locationRow}>
+            <Ionicons name="location" size={14} color={COLORS.textSecondary} />
+            <Text variant="caption" color="text-secondary" style={styles.locationText} numberOfLines={1}>
+              {location}
             </Text>
           </View>
           
-          <View style={styles.detailsLink}>
-            <Text variant="caption" color="primary" weight="medium">
-              Voir détails
-            </Text>
-            <Ionicons 
-              name="chevron-forward" 
-              size={14} 
-              color={COLORS.primary} 
-              style={styles.marginLeftXs} 
-            />
+          {/* Pied de carte avec date et bouton selon le statut */}
+          <View style={styles.cardFooter}>
+            <View style={styles.dateRow}>
+              <Ionicons name="calendar-outline" size={12} color={COLORS.textSecondary} />
+              <Text variant="caption" color="text-secondary" style={{marginLeft: 4}}>
+                {formattedDate}
+              </Text>
+            </View>
+            
+            {isPaidButNotStarted && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="success">
+                  Démarrer la mission
+                </Text>
+                <Ionicons name="play" size={12} color={COLORS.success} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
+            
+            {isInProgress && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="primary">
+                  Continuer
+                </Text>
+                <Ionicons name="arrow-forward" size={12} color={COLORS.primary} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
+            
+            {isCompleted && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="success">
+                  Voir le détail
+                </Text>
+                <Ionicons name="chevron-forward" size={12} color={COLORS.success} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
+            
+            {!isPaidButNotStarted && !isInProgress && !isCompleted && (
+              <TouchableOpacity style={styles.actionButton} activeOpacity={0.8}>
+                <Text variant="caption" weight="semibold" color="text-secondary">
+                  Voir détails
+                </Text>
+                <Ionicons name="chevron-forward" size={12} color={COLORS.textSecondary} style={{marginLeft: 2}} />
+              </TouchableOpacity>
+            )}
           </View>
-        </View>
-      </Card>
+        </Card>
+      </TouchableOpacity>
     );
   };
 
@@ -398,45 +412,75 @@ const MyJobsScreen = ({ navigation }: any) => {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={[styles.container, { paddingBottom: insets.bottom }]}>
       <View style={styles.header}>
         <Text variant="h3" weight="semibold">Mes missions</Text>
-      </View>
-      
-      <View style={styles.tabsContainer}>
-        <TouchableOpacity 
-          style={[
-            styles.tab, 
-            activeTab === 'active' && styles.activeTab
-          ]}
-          onPress={() => setActiveTab('active')}
-          activeOpacity={0.7}
-        >
-          <Text 
-            variant="body2" 
-            weight={activeTab === 'active' ? 'semibold' : 'regular'}
-            color={activeTab === 'active' ? 'primary' : 'text-secondary'}
-          >
-            En cours ({activeJobs.length})
-          </Text>
-        </TouchableOpacity>
         
-        <TouchableOpacity 
-          style={[
-            styles.tab, 
-            activeTab === 'completed' && styles.activeTab
-          ]}
-          onPress={() => setActiveTab('completed')}
-          activeOpacity={0.7}
-        >
-          <Text 
-            variant="body2" 
-            weight={activeTab === 'completed' ? 'semibold' : 'regular'}
-            color={activeTab === 'completed' ? 'primary' : 'text-secondary'}
+        <View style={styles.tabsContainer}>
+          <TouchableOpacity 
+            style={[
+              styles.tab, 
+              activeTab === 'active' && styles.activeTab
+            ]}
+            onPress={() => setActiveTab('active')}
+            activeOpacity={0.8}
           >
-            Terminées ({completedJobs.length})
-          </Text>
-        </TouchableOpacity>
+            <View style={styles.tabContent}>
+              <Ionicons 
+                name="briefcase" 
+                size={16} 
+                color={activeTab === 'active' ? COLORS.primary : COLORS.textSecondary} 
+              />
+              <Text 
+                variant="body2" 
+                weight={activeTab === 'active' ? 'semibold' : 'regular'}
+                color={activeTab === 'active' ? 'primary' : 'text-secondary'}
+                style={{marginLeft: 4}}
+              >
+                En cours
+              </Text>
+              {activeJobs.length > 0 && (
+                <View style={styles.counterBadge}>
+                  <Text variant="caption" weight="semibold" color="light">
+                    {activeJobs.length}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={[
+              styles.tab, 
+              activeTab === 'completed' && styles.activeTab
+            ]}
+            onPress={() => setActiveTab('completed')}
+            activeOpacity={0.8}
+          >
+            <View style={styles.tabContent}>
+              <Ionicons 
+                name="checkmark-circle" 
+                size={16} 
+                color={activeTab === 'completed' ? COLORS.primary : COLORS.textSecondary} 
+              />
+              <Text 
+                variant="body2" 
+                weight={activeTab === 'completed' ? 'semibold' : 'regular'}
+                color={activeTab === 'completed' ? 'primary' : 'text-secondary'}
+                style={{marginLeft: 4}}
+              >
+                Terminées
+              </Text>
+              {completedJobs.length > 0 && (
+                <View style={styles.counterBadge}>
+                  <Text variant="caption" weight="semibold" color="light">
+                    {completedJobs.length}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </TouchableOpacity>
+        </View>
       </View>
       
       {(activeTab === 'active' && activeJobs.length === 0) || 
@@ -460,15 +504,13 @@ const MyJobsScreen = ({ navigation }: any) => {
           </Text>
           
           {activeTab === 'active' && (
-            <TouchableOpacity
-              style={styles.browseButton}
+            <Button
+              variant="primary"
+              label="Parcourir les demandes"
               onPress={() => navigation.navigate('RequestList')}
-              activeOpacity={0.8}
-            >
-              <Text variant="button" weight="semibold" color="light">
-                Parcourir les demandes
-              </Text>
-            </TouchableOpacity>
+              style={styles.browseButton}
+              leftIcon={<Ionicons name="search" size={18} color="#FFFFFF" />}
+            />
           )}
         </View>
       ) : (
@@ -497,94 +539,213 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
-  header: {
-    padding: SPACING.md,
-    backgroundColor: COLORS.white,
-    ...SHADOWS.small,
-  },
   loaderContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: COLORS.background,
   },
+  header: {
+    padding: SPACING.md,
+    backgroundColor: COLORS.white,
+    ...SHADOWS.small,
+    marginBottom: SPACING.sm,
+  },
   tabsContainer: {
     flexDirection: 'row',
     backgroundColor: COLORS.white,
-    paddingHorizontal: SPACING.md,
-    paddingBottom: SPACING.md,
-    ...SHADOWS.small,
-    marginBottom: SPACING.sm,
+    marginTop: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: `${COLORS.primary}20`,
   },
   tab: {
     flex: 1,
     paddingVertical: SPACING.sm,
     alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
+    backgroundColor: COLORS.background,
   },
   activeTab: {
-    borderBottomColor: COLORS.primary,
+    backgroundColor: `${COLORS.primary}15`,
+  },
+  tabContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  counterBadge: {
+    backgroundColor: COLORS.primary,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 6,
   },
   listContainer: {
     padding: SPACING.md,
-    paddingTop: SPACING.sm,
+    paddingTop: SPACING.xs,
   },
+  
+  // Styles des cartes de mission
   jobCard: {
-    marginBottom: SPACING.md,
+    marginBottom: SPACING.sm,
+    padding: SPACING.sm,
+    backgroundColor: COLORS.white,
+    borderRadius: BORDER_RADIUS.md,
   },
+  paidJobCard: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.success,
+  },
+  inProgressCard: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.primary,
+  },
+  completedCard: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.success,
+  },
+  
+  // En-tête de carte
   cardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: SPACING.sm,
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
   },
-  leftContainer: {
+  clientSection: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
   },
   iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: BORDER_RADIUS.round,
-    backgroundColor: `${COLORS.primary}15`,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: SPACING.sm,
+    ...SHADOWS.small,
   },
-  clientInfo: {
+  paidIconContainer: {
+    backgroundColor: COLORS.success,
+  },
+  inProgressIconContainer: {
+    backgroundColor: COLORS.primary,
+  },
+  completedIconContainer: {
+    backgroundColor: COLORS.success,
+  },
+  clientName: {
+    marginLeft: SPACING.xs,
+    fontSize: 14,
+    textTransform: 'capitalize',
     flex: 1,
   },
-  priceContainer: {
-    backgroundColor: `${COLORS.success}15`,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: BORDER_RADIUS.round,
-  },
-  separator: {
-    height: 1,
-    backgroundColor: COLORS.border,
-    marginVertical: SPACING.sm,
-  },
-  serviceRow: {
+  
+  // Indicateurs d'état
+  paidIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: SPACING.sm,
+    backgroundColor: `${COLORS.success}15`,
+    padding: 6,
+    borderRadius: BORDER_RADIUS.sm,
+    marginBottom: SPACING.xs,
   },
+  indicatorText: {
+    marginLeft: 4,
+  },
+  
+  // Barre de progression
+  progressContainer: {
+    marginBottom: SPACING.xs,
+  },
+  progressBar: {
+    height: 4,
+    backgroundColor: `${COLORS.backgroundDark}30`,
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginBottom: 3,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: COLORS.primary,
+    borderRadius: 2,
+  },
+  progressLabel: {
+    textAlign: 'right',
+    fontSize: 10,
+  },
+  
+  // Ligne d'informations
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: SPACING.xs,
   },
-  dateContainer: {
+  serviceContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  serviceText: {
+    marginLeft: 4,
+    fontSize: 12,
+  },
+  priceContainer: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+  },
+  paidPriceContainer: {
+    backgroundColor: COLORS.success,
+  },
+  inProgressPriceContainer: {
+    backgroundColor: COLORS.primary,
+  },
+  completedPriceContainer: {
+    backgroundColor: COLORS.success,
+  },
+  
+  // Ligne d'adresse
+  locationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  locationText: {
+    marginLeft: 4,
+    flex: 1,
+  },
+  
+  // Pied de carte
+  cardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: `${COLORS.border}50`,
+    paddingTop: SPACING.xs,
+    marginTop: SPACING.xs,
+  },
+  dateRow: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  detailsLink: {
+  actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: `${COLORS.backgroundDark}15`,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
   },
+  
+  // Styles pour l'interface vide
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -605,21 +766,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   browseButton: {
-    backgroundColor: COLORS.primary,
     paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    borderRadius: BORDER_RADIUS.md,
     ...SHADOWS.small,
-  },
-  marginLeft: {
-    marginLeft: SPACING.sm,
-  },
-  marginLeftXs: {
-    marginLeft: 4,
-  },
-  marginTopXs: {
-    marginTop: SPACING.xs,
-  },
+  }
 });
 
 export default MyJobsScreen;
